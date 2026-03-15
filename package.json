@@ -9,7 +9,8 @@
     "demo:auto": "tsx src/demo-auto.ts",
     "demo:llm": "tsx src/demo-llm.ts",
     "test": "tsx src/test.ts",
-    "validate": "tsx src/validate-sessions.ts"
+    "validate": "tsx src/validate-sessions.ts",
+    "inspect": "tsx src/inspect.ts"
   },
   "keywords": [],
   "author": "",

@@ -41,6 +41,18 @@ async function modules() {
   return _modules;
 }
 
+// ── Logging ──
+
+function logEvent(stateDir, entry) {
+  try {
+    ensureDir(stateDir);
+    const logPath = path.join(stateDir, "dendrite.log");
+    const ts = new Date().toISOString();
+    const line = `${ts} ${JSON.stringify(entry)}\n`;
+    fs.appendFileSync(logPath, line, "utf-8");
+  } catch {}
+}
+
 // ── State management ──
 
 const STATE_DIR_NAME = ".dendrite";
@@ -154,6 +166,15 @@ async function handleMessageReceived(event) {
       );
 
       if (returnResult.should_return && returnResult.target_branch_id) {
+        const target = returnCandidates.find((b) => b.id === returnResult.target_branch_id);
+        logEvent(stateDir, {
+          event: "return",
+          from_branch: branch.name,
+          to_branch: target?.name || "?",
+          reason: returnResult.reason,
+          confidence: returnResult.confidence,
+          message: content.substring(0, 100),
+        });
         tree.returnTo(returnResult.target_branch_id);
         tree.addMessage("user", content, mods.emptyKnowledgeDiff());
         mods.saveState(tree, statePath);
@@ -168,14 +189,43 @@ async function handleMessageReceived(event) {
 
       if (drift.should_fork) {
         const topic = drift.suggested_topic || "tangent";
+        logEvent(stateDir, {
+          event: "fork",
+          from_branch: branch.name,
+          new_branch: topic,
+          reason: drift.reason,
+          confidence: drift.confidence,
+          message: content.substring(0, 100),
+        });
         tree.fork(topic, topic);
+      } else {
+        logEvent(stateDir, {
+          event: "stay",
+          branch: branch.name,
+          reason: drift.reason,
+          drift_score: drift.drift_score,
+          message: content.substring(0, 100),
+        });
       }
+    } else {
+      logEvent(stateDir, {
+        event: "stay",
+        branch: branch.name,
+        reason: `building context (${branch.messages.length}/${config.min_messages_before_fork} msgs)`,
+        message: content.substring(0, 100),
+      });
     }
 
     // Step 3: Add message to current branch
     tree.addMessage("user", content, mods.emptyKnowledgeDiff());
     mods.saveState(tree, statePath);
   } catch (err) {
+    logEvent(stateDir, {
+      event: "error",
+      branch: branch.name,
+      error: err?.message || String(err),
+      message: content.substring(0, 100),
+    });
     // Don't crash the hook on detection errors — just add the message
     tree.addMessage("user", content, mods.emptyKnowledgeDiff());
     mods.saveState(tree, statePath);
@@ -212,6 +262,13 @@ async function handleBootstrap(event) {
     (f) => f.name === "MEMORY.md" || f.name === "memory.md"
   );
 
+  logEvent(stateDir, {
+    event: "bootstrap",
+    branches: tree.allBranches.length,
+    active: tree.currentBranch.name,
+    context_length: branchContext.length,
+  });
+
   if (memoryFile && !memoryFile.missing) {
     memoryFile.content =
       (memoryFile.content || "") +
@@ -243,6 +300,8 @@ function handleSessionReset(event) {
     .replace(/[:.]/g, "-")
     .slice(0, 19);
   const archivePath = statePath.replace(".json", `.archived-${timestamp}.json`);
+
+  logEvent(stateDir, { event: "session_reset", action: event.action });
 
   try {
     fs.renameSync(statePath, archivePath);
