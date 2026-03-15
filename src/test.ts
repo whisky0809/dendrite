@@ -441,6 +441,185 @@ console.log("\n=== Return-To ===\n");
   assert(threwPruned, "returnTo: throws when target is pruned");
 }
 
+// ── Context Composer Tests ──
+
+import {
+  composeContext,
+  composeTreeOverview,
+  composeSystemBlock,
+} from "./context-composer.js";
+
+console.log("\n=== Context Composer ===\n");
+
+{
+  console.log("  Basic composition:");
+  const tree = new BranchTree(
+    {
+      agent_identity: "Atlas",
+      user_profile: "Pedro",
+      long_term_memory: ["fact 1"],
+    },
+    { auto_branch: false }
+  );
+
+  tree.addMessage("user", "Let's design the REST API");
+  tree.addMessage("agent", "I suggest POST /users, GET /quests");
+  tree.addMessage("user", "What about authentication?");
+
+  const ctx = tree.buildWorkingContext();
+  const composed = composeContext(ctx);
+
+  assert(composed.includes("main"), "includes branch name");
+  assert(composed.includes("REST API"), "includes conversation content");
+  assert(composed.includes("User:"), "formats user role");
+  assert(composed.includes("Assistant:"), "formats assistant role");
+}
+
+{
+  console.log("\n  Tree overview with branches:");
+  const tree = new BranchTree(
+    { agent_identity: "test", user_profile: "test", long_term_memory: [] },
+    { auto_branch: false }
+  );
+
+  tree.addMessage("user", "Main topic");
+  tree.addMessage("agent", "Response");
+  tree.fork("docker-tangent", "Docker deployment");
+  tree.addMessage("user", "How does Docker work?");
+  tree.addMessage("agent", "Bridge network...");
+
+  const overview = composeTreeOverview(tree);
+  assert(overview.includes("main"), "shows main branch");
+  assert(overview.includes("docker-tangent"), "shows child branch");
+  assert(overview.includes("you are here"), "marks active branch");
+}
+
+{
+  console.log("\n  System block with merged context:");
+  const tree = new BranchTree(
+    { agent_identity: "test", user_profile: "test", long_term_memory: [] },
+    { auto_branch: false }
+  );
+
+  tree.addMessage("user", "API design discussion");
+  tree.addMessage("agent", "Let's use REST");
+  tree.addMessage("user", "Good idea");
+
+  const tangent = tree.fork("infra", "infrastructure");
+  tree.addMessage("user", "How does Docker networking work?");
+  tree.addMessage("agent", "Bridge network with DNS");
+
+  // Return to main (switch + merge)
+  const main = tree.allBranches.find((b) => b.name === "main")!;
+  tree.returnTo(main.id);
+  tree.addMessage("user", "Back to API design");
+
+  const block = composeSystemBlock(tree);
+  assert(block.includes("main"), "system block has active branch");
+  assert(block.includes("Merged from tangents"), "includes merged context");
+  assert(block.includes("infra"), "references merged branch");
+}
+
+// ── State Persistence Tests ──
+
+import { saveState, loadState } from "./state.js";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
+
+console.log("\n=== State Persistence ===\n");
+
+{
+  console.log("  Save and load round-trip:");
+  const base = {
+    agent_identity: "Atlas",
+    user_profile: "Pedro",
+    long_term_memory: ["memory 1"],
+  };
+
+  const tree = new BranchTree(base, { auto_branch: false });
+  tree.addMessage("user", "Main topic");
+  tree.addMessage("agent", "Response on main");
+
+  const tangent = tree.fork("tangent-1", "side topic");
+  tree.addMessage("user", "Tangent message");
+  tree.addMessage("agent", "Tangent response");
+
+  // Save
+  const tmpFile = path.join(os.tmpdir(), `dendrite-test-${Date.now()}.json`);
+  saveState(tree, tmpFile);
+
+  assert(fs.existsSync(tmpFile), "state file created");
+
+  // Load
+  const loaded = loadState(tmpFile, base);
+  assert(loaded !== null, "state loaded successfully");
+  assert(loaded!.allBranches.length === 2, "restored 2 branches");
+  assert(
+    loaded!.currentBranch.name === "tangent-1",
+    "active branch restored"
+  );
+  assert(
+    loaded!.currentBranch.messages.length === 2,
+    "tangent messages restored"
+  );
+
+  const loadedMain = loaded!.allBranches.find((b) => b.name === "main")!;
+  assert(loadedMain.messages.length === 2, "main messages restored");
+
+  // Cleanup
+  fs.unlinkSync(tmpFile);
+}
+
+{
+  console.log("\n  Load nonexistent file:");
+  const result = loadState("/tmp/nonexistent-dendrite-state.json", {
+    agent_identity: "test",
+    user_profile: "test",
+    long_term_memory: [],
+  });
+  assert(result === null, "returns null for missing file");
+}
+
+{
+  console.log("\n  Save/load with merged branches:");
+  const base = {
+    agent_identity: "test",
+    user_profile: "test",
+    long_term_memory: [],
+  };
+
+  const tree = new BranchTree(base, { auto_branch: false });
+  tree.addMessage("user", "Main topic");
+  tree.addMessage("agent", "Main response");
+
+  const tangent = tree.fork("explored", "exploration");
+  tree.addMessage("user", "Exploring something");
+  tree.addMessage("agent", "Found info");
+
+  const main = tree.allBranches.find((b) => b.name === "main")!;
+  tree.returnTo(main.id);
+
+  assert(tangent.status === "merged", "tangent merged before save");
+
+  const tmpFile = path.join(os.tmpdir(), `dendrite-merge-${Date.now()}.json`);
+  saveState(tree, tmpFile);
+
+  const loaded = loadState(tmpFile, base);
+  assert(loaded !== null, "merged state loaded");
+
+  const restoredTangent = loaded!.allBranches.find(
+    (b) => b.name === "explored"
+  )!;
+  assert(restoredTangent.status === "merged", "merged status preserved");
+  assert(
+    loaded!.currentBranch.merge_sources.length > 0,
+    "merge sources restored"
+  );
+
+  fs.unlinkSync(tmpFile);
+}
+
 // ── Summary ──
 
 console.log(`\n${"=".repeat(40)}`);
