@@ -1,5 +1,5 @@
 {
-  "name": "branching-conversations",
+  "name": "dendrite",
   "version": "1.0.0",
   "description": "Git-like branching conversation model for AI agents",
   "main": "dist/index.js",
@@ -8,7 +8,8 @@
     "demo": "tsx src/demo.ts",
     "demo:auto": "tsx src/demo-auto.ts",
     "demo:llm": "tsx src/demo-llm.ts",
-    "test": "tsx src/test.ts"
+    "test": "tsx src/test.ts",
+    "validate": "tsx src/validate-sessions.ts"
   },
   "keywords": [],
   "author": "",
