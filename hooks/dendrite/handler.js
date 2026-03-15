@@ -9,27 +9,37 @@
 
 import path from "node:path";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 
-// Import dendrite from compiled dist
-const DENDRITE_ROOT = path.resolve(
-  path.dirname(new URL(import.meta.url).pathname),
-  ".."
-);
-const DIST = path.join(DENDRITE_ROOT, "dist");
+// ── Lazy module loading (avoids top-level await) ──
 
-// Dynamic imports from dendrite dist (ESM)
-const { BranchTree } = await import(path.join(DIST, "branch-tree.js"));
-const { LLMDriftDetector } = await import(
-  path.join(DIST, "llm-drift-detector.js")
-);
-const { LLMReturnDetector } = await import(
-  path.join(DIST, "return-detector.js")
-);
-const { composeSystemBlock } = await import(
-  path.join(DIST, "context-composer.js")
-);
-const { saveState, loadState } = await import(path.join(DIST, "state.js"));
-const { emptyKnowledgeDiff } = await import(path.join(DIST, "types.js"));
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DIST = path.join(__dirname, "..", "..", "dist");
+
+let _modules = null;
+
+async function modules() {
+  if (_modules) return _modules;
+  const [btMod, driftMod, returnMod, composerMod, stateMod, typesMod] =
+    await Promise.all([
+      import(path.join(DIST, "branch-tree.js")),
+      import(path.join(DIST, "llm-drift-detector.js")),
+      import(path.join(DIST, "return-detector.js")),
+      import(path.join(DIST, "context-composer.js")),
+      import(path.join(DIST, "state.js")),
+      import(path.join(DIST, "types.js")),
+    ]);
+  _modules = {
+    BranchTree: btMod.BranchTree,
+    LLMDriftDetector: driftMod.LLMDriftDetector,
+    LLMReturnDetector: returnMod.LLMReturnDetector,
+    composeSystemBlock: composerMod.composeSystemBlock,
+    saveState: stateMod.saveState,
+    loadState: stateMod.loadState,
+    emptyKnowledgeDiff: typesMod.emptyKnowledgeDiff,
+  };
+  return _modules;
+}
 
 // ── State management ──
 
@@ -40,7 +50,6 @@ function resolveStateDir(workspaceDir) {
 }
 
 function resolveStatePath(stateDir, sessionKey) {
-  // Sanitize session key for filename
   const safe = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 100);
   return path.join(stateDir, `${safe}.json`);
 }
@@ -54,7 +63,6 @@ function ensureDir(dir) {
 // ── Config resolution ──
 
 function resolveConfig(event) {
-  // Try to get hook-specific config from openclaw.json
   const cfg = event.context?.cfg;
   const hookConfig = cfg?.hooks?.internal?.entries?.dendrite || {};
 
@@ -67,14 +75,14 @@ function resolveConfig(event) {
   };
 }
 
-// ── Detector cache (avoid re-creating per event) ──
+// ── Detector cache ──
 
 let cachedDriftDetector = null;
 let cachedReturnDetector = null;
 
-function getDriftDetector(config) {
+function getDriftDetector(mods, config) {
   if (!cachedDriftDetector) {
-    cachedDriftDetector = new LLMDriftDetector({
+    cachedDriftDetector = new mods.LLMDriftDetector({
       model: config.model,
       min_messages_before_fork: config.min_messages_before_fork,
     });
@@ -82,9 +90,9 @@ function getDriftDetector(config) {
   return cachedDriftDetector;
 }
 
-function getReturnDetector(config) {
+function getReturnDetector(mods, config) {
   if (!cachedReturnDetector) {
-    cachedReturnDetector = new LLMReturnDetector({
+    cachedReturnDetector = new mods.LLMReturnDetector({
       model: config.model,
       min_messages_before_return: config.min_messages_before_return,
     });
@@ -94,17 +102,17 @@ function getReturnDetector(config) {
 
 // ── Load or create branch tree ──
 
-function loadOrCreateTree(statePath) {
+function loadOrCreateTree(mods, statePath) {
   const base = {
     agent_identity: "",
     user_profile: "",
     long_term_memory: [],
   };
 
-  const tree = loadState(statePath, base);
+  const tree = mods.loadState(statePath, base);
   if (tree) return tree;
 
-  return new BranchTree(base, { auto_branch: false });
+  return new mods.BranchTree(base, { auto_branch: false });
 }
 
 // ── Event: message:received ──
@@ -114,13 +122,14 @@ async function handleMessageReceived(event) {
   if (!content || typeof content !== "string") return;
   if (content.trim().length < 5) return;
 
+  const mods = await modules();
   const config = resolveConfig(event);
   const workspaceDir = event.context?.workspaceDir || process.env.HOME;
   const stateDir = resolveStateDir(workspaceDir);
   ensureDir(stateDir);
 
   const statePath = resolveStatePath(stateDir, event.sessionKey);
-  const tree = loadOrCreateTree(statePath);
+  const tree = loadOrCreateTree(mods, statePath);
   const branch = tree.currentBranch;
 
   try {
@@ -137,7 +146,7 @@ async function handleMessageReceived(event) {
       returnCandidates.length > 0 &&
       branch.messages.length >= config.min_messages_before_return
     ) {
-      const returnDetector = getReturnDetector(config);
+      const returnDetector = getReturnDetector(mods, config);
       const returnResult = await returnDetector.analyze(
         branch,
         returnCandidates,
@@ -146,15 +155,15 @@ async function handleMessageReceived(event) {
 
       if (returnResult.should_return && returnResult.target_branch_id) {
         tree.returnTo(returnResult.target_branch_id);
-        tree.addMessage("user", content, emptyKnowledgeDiff());
-        saveState(tree, statePath);
+        tree.addMessage("user", content, mods.emptyKnowledgeDiff());
+        mods.saveState(tree, statePath);
         return;
       }
     }
 
     // Step 2: Check drift (new tangent)
     if (branch.messages.length >= config.min_messages_before_fork) {
-      const driftDetector = getDriftDetector(config);
+      const driftDetector = getDriftDetector(mods, config);
       const drift = await driftDetector.analyzeAsync(branch, content);
 
       if (drift.should_fork) {
@@ -164,18 +173,18 @@ async function handleMessageReceived(event) {
     }
 
     // Step 3: Add message to current branch
-    tree.addMessage("user", content, emptyKnowledgeDiff());
-    saveState(tree, statePath);
+    tree.addMessage("user", content, mods.emptyKnowledgeDiff());
+    mods.saveState(tree, statePath);
   } catch (err) {
     // Don't crash the hook on detection errors — just add the message
-    tree.addMessage("user", content, emptyKnowledgeDiff());
-    saveState(tree, statePath);
+    tree.addMessage("user", content, mods.emptyKnowledgeDiff());
+    mods.saveState(tree, statePath);
   }
 }
 
 // ── Event: agent:bootstrap ──
 
-function handleBootstrap(event) {
+async function handleBootstrap(event) {
   const context = event.context;
   if (!context?.bootstrapFiles) return;
 
@@ -185,13 +194,14 @@ function handleBootstrap(event) {
 
   if (!fs.existsSync(statePath)) return;
 
-  const tree = loadOrCreateTree(statePath);
+  const mods = await modules();
+  const tree = loadOrCreateTree(mods, statePath);
   if (tree.allBranches.length <= 1 && tree.currentBranch.messages.length === 0) {
-    return; // No branching state yet
+    return;
   }
 
   const config = resolveConfig(event);
-  const branchContext = composeSystemBlock(tree, {
+  const branchContext = mods.composeSystemBlock(tree, {
     max_recent_messages: config.max_recent_messages,
     show_tree_overview: true,
     show_knowledge: true,
@@ -203,13 +213,11 @@ function handleBootstrap(event) {
   );
 
   if (memoryFile && !memoryFile.missing) {
-    // Append to existing MEMORY.md content
     memoryFile.content =
       (memoryFile.content || "") +
       "\n\n## Dendrite — Active Conversation Branches\n\n" +
       branchContext;
   } else {
-    // Create a MEMORY.md bootstrap file with branch context
     context.bootstrapFiles.push({
       name: "MEMORY.md",
       path: path.join(workspaceDir || "", "MEMORY.md"),
@@ -223,9 +231,6 @@ function handleBootstrap(event) {
 // ── Event: command:new / command:reset ──
 
 function handleSessionReset(event) {
-  // When a session resets, archive the current branch state so the next
-  // session starts fresh. The state file is renamed with a timestamp
-  // so it can be reviewed later if needed.
   const context = event.context || {};
   const workspaceDir = context.workspaceDir || process.env.HOME;
   const stateDir = resolveStateDir(workspaceDir);
@@ -242,7 +247,6 @@ function handleSessionReset(event) {
   try {
     fs.renameSync(statePath, archivePath);
   } catch {
-    // If rename fails, just delete — don't let stale state leak
     try {
       fs.unlinkSync(statePath);
     } catch {}
@@ -255,7 +259,7 @@ const dendriteHook = async (event) => {
   if (event.type === "message" && event.action === "received") {
     await handleMessageReceived(event);
   } else if (event.type === "agent" && event.action === "bootstrap") {
-    handleBootstrap(event);
+    await handleBootstrap(event);
   } else if (
     event.type === "command" &&
     (event.action === "new" || event.action === "reset")
