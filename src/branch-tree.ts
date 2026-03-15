@@ -107,6 +107,26 @@ export class BranchTree {
   }
 
   /**
+   * Return to a previous branch, merging the current branch's knowledge into it.
+   * Combines switchTo + merge in one atomic operation.
+   * Used when the user returns from a tangent to a previous topic.
+   */
+  returnTo(target_id: BranchId): MergeResult {
+    const current = this.currentBranch;
+    const current_id = current.id;
+
+    if (current_id === target_id) {
+      throw new Error("Already on target branch");
+    }
+
+    // Switch to target
+    this.switchTo(target_id);
+
+    // Merge the branch we just left
+    return this.merge(current_id);
+  }
+
+  /**
    * Add a message to the current branch (no drift detection).
    */
   addMessage(

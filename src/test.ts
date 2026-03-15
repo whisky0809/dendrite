@@ -366,6 +366,81 @@ console.log("\n=== Branch Tree ===\n");
   assert(output.includes("← active"), "tree marks active branch");
 }
 
+// ── Return-To Tests ──
+
+console.log("\n=== Return-To ===\n");
+
+{
+  console.log("  Return-to operations:");
+  const tree = new BranchTree(
+    {
+      agent_identity: "test agent",
+      user_profile: "test user",
+      long_term_memory: [],
+    },
+    { auto_branch: false }
+  );
+
+  // Build: main → tangent with some messages
+  tree.addMessage("user", "Main topic discussion about APIs");
+  tree.addMessage("agent", "Let's design the REST endpoints");
+  tree.addMessage("user", "What about authentication?");
+  tree.addMessage("agent", "We should use bearer tokens");
+
+  const tangent = tree.fork("docker-tangent", "Docker deployment");
+  tree.addMessage("user", "How does Docker networking work?");
+  tree.addMessage("agent", "Bridge network with three containers");
+
+  // Return to main — should switch + merge
+  const main = tree.allBranches.find((b) => b.name === "main")!;
+  const result = tree.returnTo(main.id);
+
+  assert(tree.currentBranch.name === "main", "returnTo: switched to main");
+  assert(tangent.status === "merged", "returnTo: tangent merged");
+  assert(
+    tree.currentBranch.merge_sources.includes(tangent.id),
+    "returnTo: main records tangent as merge source"
+  );
+  assert(result.merged_summary.length > 0, "returnTo: produced merge summary");
+}
+
+{
+  console.log("\n  Return-to edge cases:");
+  const tree = new BranchTree(
+    {
+      agent_identity: "test agent",
+      user_profile: "test user",
+      long_term_memory: [],
+    },
+    { auto_branch: false }
+  );
+
+  // Can't return to self
+  let threwSelf = false;
+  try {
+    tree.returnTo(tree.currentBranch.id);
+  } catch {
+    threwSelf = true;
+  }
+  assert(threwSelf, "returnTo: throws when target is current branch");
+
+  // Can't return to pruned branch
+  tree.addMessage("user", "Main content");
+  const pruned = tree.fork("pruned-branch", "will be pruned");
+  tree.addMessage("user", "Dead end content");
+  const main = tree.allBranches.find((b) => b.name === "main")!;
+  tree.switchTo(main.id);
+  tree.prune(pruned.id, "dead end");
+
+  let threwPruned = false;
+  try {
+    tree.returnTo(pruned.id);
+  } catch {
+    threwPruned = true;
+  }
+  assert(threwPruned, "returnTo: throws when target is pruned");
+}
+
 // ── Summary ──
 
 console.log(`\n${"=".repeat(40)}`);

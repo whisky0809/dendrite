@@ -1,12 +1,9 @@
 /**
- * Demo: LLM-powered automatic branching.
+ * Demo: LLM-powered automatic branching with return detection.
  *
- * Uses Gemini embeddings for semantic similarity scoring
- * and Moonshot LLM for drift classification + topic naming.
+ * Shows the full loop: fork → explore → return → merge
  *
- * Run: GEMINI_API_KEY=... MOONSHOT_API_KEY=... npx tsx src/demo-llm.ts
- * Or: npx tsx src/demo-llm.ts --mode llm       (Moonshot only)
- *     npx tsx src/demo-llm.ts --mode embedding  (Gemini only)
+ * Run: npx tsx src/demo-llm.ts --mode llm
  */
 
 import { LLMBranchTree } from "./llm-branch-tree.js";
@@ -16,7 +13,8 @@ const modeArg = process.argv.find((_, i) => process.argv[i - 1] === "--mode");
 const mode = (modeArg as "llm" | "embedding" | "both") || "both";
 
 console.log(`\n╔══════════════════════════════════════════════════════════╗`);
-console.log(`║     LLM-Powered Branching Demo (mode: ${mode.padEnd(9)})          ║`);
+console.log(`║   Branching Conversations — Full Loop Demo               ║`);
+console.log(`║   (mode: ${mode.padEnd(9)})                                      ║`);
 console.log(`╚══════════════════════════════════════════════════════════╝\n`);
 
 const tree = new LLMBranchTree(
@@ -32,12 +30,13 @@ const tree = new LLMBranchTree(
   }
 );
 
-// Conversation script
+// Conversation script — shows fork, continue, return, and fork again
 const script: Array<{
   role: "user" | "agent";
   content: string;
   note?: string;
 }> = [
+  // ── Phase 1: Establish API design topic ──
   {
     role: "user",
     content: "I want to design the REST API endpoints for the quest system. Players need to create characters, accept quests, and track progress.",
@@ -65,10 +64,12 @@ const script: Array<{
     role: "agent",
     content: "201 Created on first accept, 409 Conflict if already accepted, 410 Gone for completed quests. Add an idempotency key for retries.",
   },
+
+  // ── Phase 2: Docker tangent ──
   {
     role: "user",
     content: "Wait, how is our Docker deployment set up? I need to understand the container networking before deciding on service discovery.",
-    note: "TANGENT → Docker/infra (should fork)",
+    note: "TANGENT → Docker/infra (should FORK)",
   },
   {
     role: "agent",
@@ -77,16 +78,29 @@ const script: Array<{
   {
     role: "user",
     content: "Is there a reverse proxy handling TLS termination?",
-    note: "Continuing Docker tangent — should NOT fork again",
+    note: "Continuing Docker tangent — should NOT fork",
   },
   {
     role: "agent",
     content: "Yes, Nginx handles TLS and routes /api/* to the API container on port 3000.",
   },
+
+  // ── Phase 3: Return to API design ──
   {
     role: "user",
-    content: "By the way, I've been thinking about the XP formula. Should defeating harder quests give exponentially more XP or linear with a multiplier?",
-    note: "TANGENT → game design / math (should fork)",
+    content: "Okay great, so Nginx handles routing. Back to the API — given that setup, should we version our quest endpoints like /api/v1/quests?",
+    note: "RETURN → back to API design (should RETURN to main)",
+  },
+  {
+    role: "agent",
+    content: "Since Nginx handles routing, go with /api/v1/quests. The config can map /api/v1/* to the same backend without changes.",
+  },
+
+  // ── Phase 4: XP formula tangent ──
+  {
+    role: "user",
+    content: "By the way, I've been thinking about the XP calculation formula. Should defeating harder quests give exponentially more XP or linear with a multiplier?",
+    note: "TANGENT → game design / math (should FORK)",
   },
   {
     role: "agent",
@@ -109,9 +123,15 @@ async function main() {
     if (turn.role === "user") {
       console.log(`  Pedro: "${preview}"`);
       const result = await tree.chat(turn.content);
-      console.log(`  → ${result.detection.reason}`);
-      if (result.forked) {
+
+      if (result.returned) {
+        console.log(`  ↩ AUTO-RETURN → "${tree.currentBranch.name}" (from "${result.returned_from!.name}")`);
+        console.log(`    ${result.return_detection!.reason}`);
+      } else if (result.forked) {
         console.log(`  🔀 AUTO-FORK → "${result.fork_branch!.name}"`);
+        console.log(`    ${result.detection.reason}`);
+      } else {
+        console.log(`  → ${result.detection.reason}`);
       }
     } else {
       console.log(`  Atlas: "${preview}"`);
@@ -129,7 +149,9 @@ async function main() {
   console.log("Total branches:", tree.allBranches.length);
   console.log(
     "Messages per branch:",
-    tree.allBranches.map((b) => `${b.name}: ${b.messages.length}`).join(", ")
+    tree.allBranches
+      .map((b) => `${b.name}(${b.status}): ${b.messages.length}`)
+      .join(", ")
   );
 }
 
