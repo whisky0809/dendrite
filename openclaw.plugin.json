@@ -1,0 +1,20 @@
+{
+  "id": "dendrite",
+  "name": "Dendrite",
+  "kind": "context-engine",
+  "description": "Topic-aware context assembly — viewport, not container",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "driftModel": { "type": "string", "default": "openrouter/hunter-alpha" },
+      "summaryModel": { "type": "string", "default": "minimax/minimax-m2.5:free" },
+      "embeddingModel": { "type": "string", "default": "gemini-embedding-001" },
+      "driftThreshold": { "type": "number", "default": 0.7 },
+      "minMessagesBeforeDrift": { "type": "integer", "default": 3 },
+      "relevanceAlpha": { "type": "number", "default": 0.7 },
+      "reserveTokens": { "type": "integer", "default": 8192 },
+      "maxSegmentMessages": { "type": "integer", "default": 80 },
+      "queryWindowSize": { "type": "integer", "default": 5 }
+    }
+  }
+}
