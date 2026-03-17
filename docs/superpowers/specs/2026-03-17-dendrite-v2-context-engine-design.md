@@ -95,7 +95,7 @@ Called when new messages enter the session. Runs before `assemble()` — orderin
 3. If the active segment exceeds `maxSegmentMessages`, force-split (close current, open new with same topic).
 4. Otherwise, run drift detection. If drift exceeds threshold: close the active segment (compute embedding), open a new segment. The `driftThreshold` config controls the LLM detector's confidence gate — the detector classifies messages as on-topic or tangent, and this threshold sets the minimum confidence required to trigger a split.
 5. Add the message to the active segment.
-6. Persist the segment index as a `custom` transcript entry (excluded from model context).
+6. Persist the segment index as a `custom` transcript entry (excluded from model context) only when the index structure changes (new segment created, segment closed, force-split). On regular message additions, update the in-memory index only. This avoids writing hundreds of copies of a growing index to the transcript in long sessions. The assembly log (written every turn) provides per-turn observability.
 
 **Latency**: drift detection requires an LLM call on every user message. Using free OpenRouter models, expect 1-3 seconds added latency per ingest. This runs before the main model call, so it adds to perceived response time. If latency is unacceptable, drift detection can be disabled (all messages go to one segment, and dendrite becomes a pass-through).
 
@@ -157,6 +157,10 @@ dendrite/
         "type": "number",
         "default": 0.7
       },
+      "embeddingModel": {
+        "type": "string",
+        "default": "gemini-embedding-001"
+      },
       "reserveTokens": {
         "type": "integer",
         "default": 8192
@@ -189,7 +193,7 @@ dendrite/
 
 | Component | Status |
 |-----------|--------|
-| LLM drift detection (`LLMDriftDetector`) | Reused with adapter — core segmenter, proven against real sessions. Needs a thin adapter to extract messages from transcript by ID and present them in the format the detector expects (v1 `Message[]`) |
+| LLM drift detection prompt logic | Reused — the LLM prompt and response parsing from v1's `LLMDriftDetector` are extracted into a standalone function: `detectDrift(recentMessages: Array<{role, content}>, newMessage: string, model, threshold)`. This avoids coupling to v1's heavyweight `BranchNode` type system. The v1 class itself is not reused |
 | Topic labeling | Reused — drift detector suggests topic names |
 | Discord metadata extraction (`extractDiscordContent`) | Reused — the content-extraction logic from v1's session adapter. The file-reading parts of the adapter are dropped (v2 receives messages from the plugin API, not from disk) |
 | Branch tree, fork/merge/prune | Dropped — replaced by flat segment list |
