@@ -13,7 +13,6 @@ import {
   DEFAULT_CONFIG,
   estimateTokens,
   extractTextContent,
-  isUserMessage,
   type DendriteConfig,
   type SimpleMessage,
   type SegmentIndex,
@@ -54,6 +53,7 @@ interface SessionState {
   totalTurns: number;
   indexDirty: boolean;
   embeddingsAvailable: boolean;
+  driftAvailable: boolean;
 }
 
 const sessions = new Map<string, SessionState>();
@@ -70,6 +70,7 @@ function createSessionState(config: DendriteConfig): SessionState {
     totalTurns: 0,
     indexDirty: false,
     embeddingsAvailable: true,
+    driftAvailable: true,
   };
 }
 
@@ -149,7 +150,7 @@ export default function dendrite(api: any) {
       state.totalTurns++;
       const result = state.segmenter.addMessage(simple);
 
-      if (result.needsDriftCheck && result.pendingMessage) {
+      if (result.needsDriftCheck && result.pendingMessage && state.driftAvailable) {
         try {
           const recent = state.segmenter.getRecentMessages(6);
           const { system, user } = buildDriftPrompt(recent, result.pendingMessage.content);
@@ -174,7 +175,8 @@ export default function dendrite(api: any) {
             }
           }
         } catch (err) {
-          api.logger?.warn?.("dendrite: drift detection failed", err);
+          state.driftAvailable = false;
+          api.logger?.warn?.("dendrite: drift detection failed, disabling for session", err);
         }
       }
 

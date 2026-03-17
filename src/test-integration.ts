@@ -8,7 +8,7 @@
 import { Segmenter } from "./segmenter.js";
 import { scoreSegments } from "./scorer.js";
 import { allocateBudgets, buildMessageArray } from "./assembler.js";
-import { createSegment, estimateTokens, type SimpleMessage } from "./types.js";
+import { estimateTokens, type SimpleMessage } from "./types.js";
 
 let passed = 0;
 let failed = 0;

@@ -212,7 +212,11 @@ export class Segmenter {
 
   /** Load from a persisted SegmentIndex. */
   loadIndex(index: SegmentIndex, messages: SimpleMessage[]): void {
-    this.segments = index.segments;
+    this.segments = index.segments.map((s) => ({
+      ...s,
+      messageIds: [...s.messageIds],
+      embedding: [...s.embedding],
+    }));
     this.messageStore.clear();
     for (const msg of messages) {
       this.messageStore.set(msg.id, msg);
@@ -221,6 +225,13 @@ export class Segmenter {
 
   /** Export current state as a SegmentIndex. */
   toIndex(): SegmentIndex {
-    return { version: 1, segments: this.segments };
+    return {
+      version: 1,
+      segments: this.segments.map((s) => ({
+        ...s,
+        messageIds: [...s.messageIds],
+        embedding: [...s.embedding],
+      })),
+    };
   }
 }
