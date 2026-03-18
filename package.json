@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "tsc --noEmit",
-    "test": "tsx src/test-types.ts && tsx src/test-segmenter.ts && tsx src/test-scorer.ts && tsx src/test-summarizer.ts && tsx src/test-assembler.ts",
+    "test": "tsx src/test-types.ts && tsx src/test-segmenter.ts && tsx src/test-scorer.ts && tsx src/test-summarizer.ts && tsx src/test-assembler.ts && tsx src/test-store.ts && tsx src/test-cli.ts",
     "test:integration": "tsx src/test-integration.ts",
     "test:all": "npm test && npm run test:integration"
   },
