@@ -366,4 +366,13 @@ export default function dendrite(api: any) {
       debug("dispose called (no-op, state preserved)");
     },
   }));
+
+  // ── CLI registration ──
+  api.registerCli(
+    async ({ program, config, logger }: { program: any; config: any; logger: any }) => {
+      const { registerDendriteCli } = await import("./cli.js");
+      registerDendriteCli({ program, config, logger });
+    },
+    { commands: ["dendrite"] }
+  );
 }
