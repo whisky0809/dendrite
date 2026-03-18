@@ -17,6 +17,7 @@ import {
   type SimpleMessage,
   type SegmentIndex,
 } from "./types.js";
+import { DendriteStore } from "./store.js";
 
 // ── AgentMessage <-> SimpleMessage conversion ──
 
@@ -87,6 +88,12 @@ function getSession(sessionId: string, config: DendriteConfig): SessionState {
 
 export default function dendrite(api: any) {
   const pluginConfig: DendriteConfig = { ...DEFAULT_CONFIG, ...(api.pluginConfig || {}) };
+
+  // OpenClawConfig doesn't expose configDir/configPath — use standard ~/.openclaw location.
+  const configDir = process.env.HOME + "/.openclaw";
+  const configPath = configDir + "/openclaw.json";
+  const store = new DendriteStore(configDir, configPath);
+
   const log = (msg: string, data?: any) => api.logger?.info?.(`dendrite: ${msg}${data ? " " + JSON.stringify(data) : ""}`);
   const debug = (msg: string, data?: any) => api.logger?.debug?.(`dendrite: ${msg}${data ? " " + JSON.stringify(data) : ""}`);
 
@@ -298,6 +305,46 @@ export default function dendrite(api: any) {
         } catch {
           // Non-critical
         }
+      }
+
+      // Persist turn snapshot for CLI peek tool
+      try {
+        const assembledText = [
+          systemPreamble || "",
+          ...conversationMessages.map((m: any) => `${m.role}: ${typeof m.content === "string" ? m.content : ""}`),
+        ].filter(Boolean).join("\n\n");
+
+        store.persistTurn({
+          timestamp: Date.now(),
+          turnIndex: state.totalTurns,
+          sessionId: params.sessionId,
+          segments: budgets.map(b => ({
+            id: b.segment.id,
+            topic: b.segment.topic,
+            status: b.segment.status,
+            messageCount: b.segment.messageCount,
+            tokenCount: b.segment.tokenCount,
+            summary: b.segment.summary,
+            tier: b.tier,
+            allocatedTokens: b.allocatedTokens,
+            compositeScore: b.scored.score,
+            semanticScore: b.scored.semanticScore,
+            recencyScore: b.scored.recencyScoreValue,
+          })),
+          assembledContext: assembledText,
+          stats: {
+            tokenBudget,
+            tokensUsed: estimatedTokens,
+            segmentsTotal: segments.length,
+            segmentsIncluded: budgets.filter(b => b.tier !== "excluded").length,
+            segmentsExcluded: budgets.filter(b => b.tier === "excluded").length,
+            embeddingsAvailable: state.embeddingsAvailable,
+            driftAvailable: state.driftAvailable,
+            fallbacks,
+          },
+        });
+      } catch (err) {
+        debug("failed to persist turn snapshot", { error: String(err) });
       }
 
       return {
