@@ -57,7 +57,7 @@ export interface DendriteConfig {
 }
 
 export const DEFAULT_CONFIG: DendriteConfig = {
-  driftModel: "openrouter/hunter-alpha",
+  driftModel: "minimax/minimax-m2.5:free",
   summaryModel: "minimax/minimax-m2.5:free",
   embeddingModel: "gemini-embedding-001",
   driftThreshold: 0.7,

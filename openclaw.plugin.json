@@ -6,7 +6,7 @@
   "configSchema": {
     "type": "object",
     "properties": {
-      "driftModel": { "type": "string", "default": "openrouter/hunter-alpha" },
+      "driftModel": { "type": "string", "default": "minimax/minimax-m2.5:free" },
       "summaryModel": { "type": "string", "default": "minimax/minimax-m2.5:free" },
       "embeddingModel": { "type": "string", "default": "gemini-embedding-001" },
       "driftThreshold": { "type": "number", "default": 0.7 },

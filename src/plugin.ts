@@ -86,7 +86,11 @@ function getSession(sessionId: string, config: DendriteConfig): SessionState {
 // ── Plugin export ──
 
 export default function dendrite(api: any) {
-  const pluginConfig: DendriteConfig = { ...DEFAULT_CONFIG, ...(api.config?.dendrite || {}) };
+  const pluginConfig: DendriteConfig = { ...DEFAULT_CONFIG, ...(api.pluginConfig || {}) };
+  const log = (msg: string, data?: any) => api.logger?.info?.(`dendrite: ${msg}${data ? " " + JSON.stringify(data) : ""}`);
+  const debug = (msg: string, data?: any) => api.logger?.debug?.(`dendrite: ${msg}${data ? " " + JSON.stringify(data) : ""}`);
+
+  debug("registering context engine", { driftModel: pluginConfig.driftModel, summaryModel: pluginConfig.summaryModel, embeddingModel: pluginConfig.embeddingModel });
 
   api.registerContextEngine("dendrite", () => ({
     info: {
@@ -96,6 +100,7 @@ export default function dendrite(api: any) {
     },
 
     async bootstrap(params: { sessionId: string; sessionFile: string }) {
+      debug("bootstrap called", { sessionId: params.sessionId, hasFile: !!params.sessionFile });
       const state = getSession(params.sessionId, pluginConfig);
 
       try {
@@ -141,6 +146,7 @@ export default function dendrite(api: any) {
     },
 
     async ingest(params: { sessionId: string; message: any; isHeartbeat?: boolean }) {
+      debug("ingest called", { sessionId: params.sessionId, role: params.message?.role, isHeartbeat: params.isHeartbeat });
       if (params.isHeartbeat) return { ingested: false };
 
       const state = getSession(params.sessionId, pluginConfig);
@@ -149,6 +155,7 @@ export default function dendrite(api: any) {
 
       state.totalTurns++;
       const result = state.segmenter.addMessage(simple);
+      debug("addMessage result", { action: result.action, needsDriftCheck: result.needsDriftCheck, totalTurns: state.totalTurns, segments: state.segmenter.segments.length });
 
       if (result.needsDriftCheck && result.pendingMessage && state.driftAvailable) {
         try {
@@ -156,8 +163,10 @@ export default function dendrite(api: any) {
           const { system, user } = buildDriftPrompt(recent, result.pendingMessage.content);
           const verdict = await callDriftModel(system, user, pluginConfig.driftModel);
 
+          debug("drift verdict", verdict);
           if (verdict.classification === "tangent" && verdict.confidence >= pluginConfig.driftThreshold) {
             const topic = verdict.suggested_topic || "tangent";
+            log(`topic drift detected → new segment: "${topic}"`);
             state.segmenter.splitOnDrift(topic);
             state.indexDirty = true;
 
@@ -170,13 +179,14 @@ export default function dendrite(api: any) {
                 closedSeg.embedding = embedding;
               } else {
                 state.embeddingsAvailable = false;
-                api.logger?.warn?.("dendrite: embedding unavailable, falling back to recency-only scoring");
+                log("embedding unavailable, falling back to recency-only scoring", { model: pluginConfig.embeddingModel });
               }
             }
           }
-        } catch (err) {
+        } catch (err: any) {
           state.driftAvailable = false;
-          api.logger?.warn?.("dendrite: drift detection failed, disabling for session", err);
+          const errMsg = err?.message || err?.status || String(err);
+          log("drift detection failed, disabling for session", { error: errMsg, model: pluginConfig.driftModel });
         }
       }
 
@@ -224,8 +234,10 @@ export default function dendrite(api: any) {
     async assemble(params: { sessionId: string; messages: any[]; tokenBudget?: number }) {
       const state = getSession(params.sessionId, pluginConfig);
       const segments = state.segmenter.segments;
+      debug("assemble called", { sessionId: params.sessionId, segments: segments.length, tokenBudget: params.tokenBudget, msgCount: params.messages?.length });
 
       if (segments.length < 2) {
+        debug("passthrough — fewer than 2 segments");
         return {
           messages: params.messages,
           estimatedTokens: params.messages.reduce((sum: number, m: any) =>
@@ -296,11 +308,15 @@ export default function dendrite(api: any) {
     },
 
     async compact() {
+      debug("compact called (noop)");
       return { ok: true, compacted: false };
     },
 
     async dispose() {
-      sessions.clear();
+      // No-op: OpenClaw calls dispose() after every turn, but session state
+      // must persist across turns for segmentation to work. The sessions Map
+      // is cleaned up when the process exits.
+      debug("dispose called (no-op, state preserved)");
     },
   }));
 }
