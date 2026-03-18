@@ -6,6 +6,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import type { Tier } from "./assembler.js";
 
 // ── Segment ──
 
@@ -67,6 +68,40 @@ export const DEFAULT_CONFIG: DendriteConfig = {
   maxSegmentMessages: 80,
   queryWindowSize: 5,
 };
+
+// ── Turn snapshot (persisted by CLI store) ──
+
+export interface TurnSnapshotSegment {
+  id: string;
+  topic: string;
+  status: "active" | "closed";
+  messageCount: number;
+  tokenCount: number;
+  summary: string | null;
+  tier: Tier;
+  allocatedTokens: number;
+  compositeScore: number;
+  semanticScore: number;
+  recencyScore: number;
+}
+
+export interface TurnSnapshot {
+  timestamp: number;
+  turnIndex: number;
+  sessionId: string;
+  segments: TurnSnapshotSegment[];
+  assembledContext: string;
+  stats: {
+    tokenBudget: number;
+    tokensUsed: number;
+    segmentsTotal: number;
+    segmentsIncluded: number;
+    segmentsExcluded: number;
+    embeddingsAvailable: boolean;
+    driftAvailable: boolean;
+    fallbacks: string[];
+  };
+}
 
 // ── Message helpers ──
 
