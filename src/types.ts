@@ -58,8 +58,8 @@ export interface DendriteConfig {
 }
 
 export const DEFAULT_CONFIG: DendriteConfig = {
-  driftModel: "minimax/minimax-m2.5:free",
-  summaryModel: "minimax/minimax-m2.5:free",
+  driftModel: "nvidia/nemotron-3-super-120b-a12b:free",
+  summaryModel: "nvidia/nemotron-3-super-120b-a12b:free",
   embeddingModel: "gemini-embedding-001",
   driftThreshold: 0.7,
   minMessagesBeforeDrift: 3,

@@ -86,13 +86,13 @@ export function scoreSegments(
  * Call embedding model to get a vector for the given text.
  * Falls back to empty vector on failure.
  */
-export async function getEmbedding(text: string, model: string): Promise<number[]> {
-  const apiKey = process.env.GEMINI_API_KEY || "";
-  if (!apiKey) return [];
+export async function getEmbedding(text: string, model: string, apiKey?: string): Promise<number[]> {
+  const key = apiKey || process.env.GEMINI_API_KEY || "";
+  if (!key) return [];
 
   try {
     const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${key}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },

@@ -18,6 +18,7 @@ import {
   type SegmentIndex,
 } from "./types.js";
 import { DendriteStore } from "./store.js";
+import { registerDendriteCli } from "./cli.js";
 
 // ── AgentMessage <-> SimpleMessage conversion ──
 
@@ -40,7 +41,7 @@ function toAgentMessage(msg: { role: string; content: string; timestamp: number 
   }
   return {
     role: msg.role as "user" | "assistant",
-    content: msg.content,
+    content: [{ type: "text", text: msg.content }],
     timestamp: msg.timestamp,
   };
 }
@@ -96,6 +97,38 @@ export default function dendrite(api: any) {
 
   const log = (msg: string, data?: any) => api.logger?.info?.(`dendrite: ${msg}${data ? " " + JSON.stringify(data) : ""}`);
   const debug = (msg: string, data?: any) => api.logger?.debug?.(`dendrite: ${msg}${data ? " " + JSON.stringify(data) : ""}`);
+
+  // ── API key resolution (lazy, cached) ──
+  let cachedOpenRouterKey: string | null = null;
+  let cachedGoogleKey: string | null = null;
+
+  async function getOpenRouterKey(): Promise<string> {
+    if (cachedOpenRouterKey !== null) return cachedOpenRouterKey;
+    let key = "";
+    try {
+      const auth = await api.runtime?.modelAuth?.resolveApiKeyForProvider?.({ provider: "openrouter" });
+      key = auth?.apiKey || process.env.OPENROUTER_API_KEY || "";
+    } catch {
+      key = process.env.OPENROUTER_API_KEY || "";
+    }
+    cachedOpenRouterKey = key;
+    debug("resolved openrouter key", { available: !!key });
+    return key;
+  }
+
+  async function getGoogleKey(): Promise<string> {
+    if (cachedGoogleKey !== null) return cachedGoogleKey;
+    let key = "";
+    try {
+      const auth = await api.runtime?.modelAuth?.resolveApiKeyForProvider?.({ provider: "google" });
+      key = auth?.apiKey || (auth as any)?.key || process.env.GEMINI_API_KEY || "";
+    } catch {
+      key = process.env.GEMINI_API_KEY || "";
+    }
+    cachedGoogleKey = key;
+    debug("resolved google key", { available: !!key });
+    return key;
+  }
 
   debug("registering context engine", { driftModel: pluginConfig.driftModel, summaryModel: pluginConfig.summaryModel, embeddingModel: pluginConfig.embeddingModel });
 
@@ -168,7 +201,7 @@ export default function dendrite(api: any) {
         try {
           const recent = state.segmenter.getRecentMessages(6);
           const { system, user } = buildDriftPrompt(recent, result.pendingMessage.content);
-          const verdict = await callDriftModel(system, user, pluginConfig.driftModel);
+          const verdict = await callDriftModel(system, user, pluginConfig.driftModel, await getOpenRouterKey());
 
           debug("drift verdict", verdict);
           if (verdict.classification === "tangent" && verdict.confidence >= pluginConfig.driftThreshold) {
@@ -181,7 +214,7 @@ export default function dendrite(api: any) {
             if (closedSeg) {
               const segText = state.segmenter.getMessages(closedSeg.messageIds)
                 .map(m => m.content).join(" ");
-              const embedding = await getEmbedding(segText, pluginConfig.embeddingModel);
+              const embedding = await getEmbedding(segText, pluginConfig.embeddingModel, await getGoogleKey());
               if (embedding.length > 0) {
                 closedSeg.embedding = embedding;
               } else {
@@ -204,7 +237,7 @@ export default function dendrite(api: any) {
       if (state.totalTurns % 5 === 0) {
         const recentMsgs = state.segmenter.getRecentMessages(pluginConfig.queryWindowSize);
         const queryText = recentMsgs.map(m => m.content).join(" ");
-        const embedding = await getEmbedding(queryText, pluginConfig.embeddingModel);
+        const embedding = await getEmbedding(queryText, pluginConfig.embeddingModel, await getGoogleKey());
         if (embedding.length > 0) {
           state.queryEmbedding = embedding;
         } else {
@@ -215,7 +248,7 @@ export default function dendrite(api: any) {
         if (active) {
           const activeText = state.segmenter.getMessages(active.messageIds)
             .map(m => m.content).join(" ");
-          const activeEmbed = await getEmbedding(activeText, pluginConfig.embeddingModel);
+          const activeEmbed = await getEmbedding(activeText, pluginConfig.embeddingModel, await getGoogleKey());
           if (activeEmbed.length > 0) active.embedding = activeEmbed;
         }
       }
@@ -267,7 +300,7 @@ export default function dendrite(api: any) {
         const seg = entry.segment;
         if (seg.status === "closed" && !seg.summary && summarizedThisTurn < 1) {
           const msgs = state.segmenter.getMessages(seg.messageIds);
-          seg.summary = await generateSummary(seg.topic, msgs, pluginConfig.summaryModel);
+          seg.summary = await generateSummary(seg.topic, msgs, pluginConfig.summaryModel, await getOpenRouterKey());
           seg.summaryTokens = estimateTokens(seg.summary);
           summarizedThisTurn++;
         }
@@ -368,9 +401,9 @@ export default function dendrite(api: any) {
   }));
 
   // ── CLI registration ──
+  // Registrar must be synchronous — OpenClaw doesn't await async registrars.
   api.registerCli(
-    async ({ program, config, logger }: { program: any; config: any; logger: any }) => {
-      const { registerDendriteCli } = await import("./cli.js");
+    ({ program, config, logger }: { program: any; config: any; logger: any }) => {
       registerDendriteCli({ program, config, logger });
     },
     { commands: ["dendrite"] }

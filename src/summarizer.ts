@@ -35,9 +35,9 @@ export function fallbackSummary(topic: string, messageCount: number): string {
 export async function callSummaryModel(
   system: string,
   user: string,
-  model: string
+  model: string,
+  apiKey: string = process.env.OPENROUTER_API_KEY || ""
 ): Promise<string> {
-  const apiKey = process.env.OPENROUTER_API_KEY || "";
   const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -69,11 +69,12 @@ export async function callSummaryModel(
 export async function generateSummary(
   topic: string,
   messages: SimpleMessage[],
-  model: string
+  model: string,
+  apiKey?: string
 ): Promise<string> {
   try {
     const { system, user } = buildSummaryPrompt(topic, messages);
-    return await callSummaryModel(system, user, model);
+    return await callSummaryModel(system, user, model, apiKey);
   } catch {
     return fallbackSummary(topic, messages.length);
   }

@@ -43,9 +43,17 @@ export interface LogEntry {
 export function parseDendriteLogLine(line: string): LogEntry | null {
   try {
     const entry = JSON.parse(line);
-    const msg = entry.message || entry.msg || "";
+    // OpenClaw logs use numeric keys ("0", "1", ...) for arguments,
+    // with _meta.logLevelName for level and "time" for timestamp.
+    const msg = entry.message || entry.msg || entry["1"] || "";
     if (typeof msg === "string" && msg.includes("dendrite:")) {
-      return entry;
+      // Normalize to our LogEntry shape
+      return {
+        ...entry,
+        message: msg,
+        level: entry.level || entry._meta?.logLevelName || "info",
+        timestamp: entry.timestamp || entry.time || "",
+      };
     }
     return null;
   } catch {
