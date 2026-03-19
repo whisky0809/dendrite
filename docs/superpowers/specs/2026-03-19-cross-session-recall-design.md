@@ -85,7 +85,7 @@ export function recencyScore(msSinceActive: number, halfLifeMs: number): number 
 }
 ```
 
-Default half-life: 10 minutes (600,000 ms). With `relevanceAlpha` at 0.7, this means past-session segments are scored almost entirely on semantic similarity — they only surface when genuinely relevant to the current conversation.
+Default half-life: 1 day (86,400,000 ms). Tuned to a typical usage pattern of 1-2 sessions per day — a segment from yesterday scores ~0.5 recency, a segment from 3 days ago scores ~0.25, a segment from a week ago scores ~0.06. Combined with `relevanceAlpha` at 0.7, past-session segments are scored primarily on semantic similarity but recent sessions still get a meaningful recency boost.
 
 ### Assembly Budget Allocation
 
@@ -161,7 +161,7 @@ Added to `DendriteConfig` and the plugin manifest's `configSchema`:
 |-------|------|---------|-------------|
 | `pinRecentSegments` | integer | 3 | Number of most recent closed segments guaranteed at least summary tier |
 | `maxCrossSessionBudgetRatio` | number | 0.3 | Max fraction of assembly budget for cross-session segments |
-| `recencyHalfLifeMs` | integer | 600000 | Half-life for time-based recency decay (ms) |
+| `recencyHalfLifeMs` | integer | 86400000 | Half-life for time-based recency decay (ms, default 1 day) |
 | `reserveTokens` | integer | 16384 | Tokens reserved for model response (bumped from 8192) |
 
 ## Error Handling
