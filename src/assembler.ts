@@ -11,6 +11,13 @@ export interface BudgetAllocation {
   scored: ScoredSegment;
 }
 
+export interface AllocateOptions {
+  currentSessionId: string | undefined;
+  pinRecentSegments: number;
+  maxCrossSessionBudgetRatio: number;
+  pinnedSegmentIds: string[];
+}
+
 /**
  * Allocate token budgets to scored segments.
  *
@@ -18,27 +25,55 @@ export interface BudgetAllocation {
  * `reserveTokens` is the guaranteed floor for the active segment.
  * Active segment gets at least `reserveTokens` worth of its most recent messages.
  * Other segments compete for the remaining budget after the active segment.
+ *
+ * When `options` is provided:
+ * - Pinned segments (by ID) are allocated before other current-session segments.
+ * - Cross-session segments (sessionId !== undefined) are capped at
+ *   `totalBudget * maxCrossSessionBudgetRatio` tokens in aggregate.
  */
 export function allocateBudgets(
   scored: ScoredSegment[],
   totalBudget: number,
-  reserveTokens: number
+  reserveTokens: number,
+  options?: AllocateOptions
 ): BudgetAllocation[] {
   const allocations: BudgetAllocation[] = [];
+  const opts = options || { currentSessionId: undefined, pinRecentSegments: 0, maxCrossSessionBudgetRatio: 1.0, pinnedSegmentIds: [] };
+  const pinnedIds = new Set(opts.pinnedSegmentIds);
+  const crossSessionBudget = totalBudget * opts.maxCrossSessionBudgetRatio;
+  let crossSessionUsed = 0;
 
-  // Active segment gets reserveTokens as a guaranteed floor, plus any
-  // additional budget needed (up to its full size).
-  // Total available for active = totalBudget + reserveTokens.
   const activeBudget = totalBudget + reserveTokens;
-  let remaining = totalBudget; // remaining for non-active segments
+  let remaining = totalBudget;
+
+  // Separate into groups matching the spec's allocation order:
+  // 1. Active, 2. Pinned recent, 3. Current-session rest, 4. Cross-session
+  const active: ScoredSegment[] = [];
+  const pinned: ScoredSegment[] = [];
+  const currentRest: ScoredSegment[] = [];
+  const crossSession: ScoredSegment[] = [];
 
   for (const entry of scored) {
+    if (entry.segment.status === "active") {
+      active.push(entry);
+    } else if (pinnedIds.has(entry.segment.id)) {
+      pinned.push(entry);
+    } else if (entry.segment.sessionId !== undefined) {
+      crossSession.push(entry);
+    } else {
+      currentRest.push(entry);
+    }
+  }
+
+  // Process order: active → pinned → current-session → cross-session
+  const ordered = [...active, ...pinned, ...currentRest, ...crossSession];
+
+  for (const entry of ordered) {
     const seg = entry.segment;
+    const isCrossSession = seg.sessionId !== undefined;
 
     if (seg.status === "active") {
-      // Active segment: guaranteed at least reserveTokens, up to full size
       const tokens = Math.min(seg.tokenCount, activeBudget);
-      // Any tokens beyond reserveTokens come from the shared budget
       const sharedUsed = Math.max(0, tokens - reserveTokens);
       remaining -= sharedUsed;
       allocations.push({ segment: seg, tier: "active", allocatedTokens: tokens, scored: entry });
@@ -50,33 +85,48 @@ export function allocateBudgets(
       continue;
     }
 
-    // Try full expansion
-    if (seg.tokenCount <= remaining) {
-      allocations.push({ segment: seg, tier: "full", allocatedTokens: seg.tokenCount, scored: entry });
-      remaining -= seg.tokenCount;
+    // For cross-session segments, check budget cap
+    const crossRemaining = isCrossSession ? crossSessionBudget - crossSessionUsed : Infinity;
+    const effectiveRemaining = Math.min(remaining, isCrossSession ? crossRemaining : Infinity);
+
+    if (effectiveRemaining <= 0) {
+      allocations.push({ segment: seg, tier: "excluded", allocatedTokens: 0, scored: entry });
       continue;
     }
 
-    // Try summary + partial (recent messages)
+    // Try full expansion
+    if (seg.tokenCount <= effectiveRemaining) {
+      const tokens = seg.tokenCount;
+      allocations.push({ segment: seg, tier: "full", allocatedTokens: tokens, scored: entry });
+      remaining -= tokens;
+      if (isCrossSession) crossSessionUsed += tokens;
+      continue;
+    }
+
+    // Try summary + partial
     const summaryTokens = seg.summary ? seg.summaryTokens : 0;
-    if (summaryTokens > 0 && summaryTokens < remaining) {
-      // Give summary + as many recent messages as fit
-      const partialBudget = remaining - summaryTokens;
+    if (summaryTokens > 0 && summaryTokens < effectiveRemaining) {
+      const partialBudget = effectiveRemaining - summaryTokens;
       if (partialBudget > 50) {
-        allocations.push({ segment: seg, tier: "partial", allocatedTokens: summaryTokens + partialBudget, scored: entry });
-        remaining -= summaryTokens + partialBudget;
+        const tokens = summaryTokens + partialBudget;
+        allocations.push({ segment: seg, tier: "partial", allocatedTokens: tokens, scored: entry });
+        remaining -= tokens;
+        if (isCrossSession) crossSessionUsed += tokens;
         continue;
       }
     }
 
     // Summary only
-    if (seg.summary && seg.summaryTokens <= remaining) {
+    if (seg.summary && seg.summaryTokens <= effectiveRemaining) {
       allocations.push({ segment: seg, tier: "summary", allocatedTokens: seg.summaryTokens, scored: entry });
       remaining -= seg.summaryTokens;
+      if (isCrossSession) crossSessionUsed += seg.summaryTokens;
       continue;
     }
 
-    // Excluded
+    // Pinned segments are guaranteed at least summary tier by processing order
+    // (they run before other segments and get first access to budget).
+    // If we reach here, budget is truly exhausted.
     allocations.push({ segment: seg, tier: "excluded", allocatedTokens: 0, scored: entry });
   }
 
@@ -101,7 +151,7 @@ export interface AssembledMessage {
  */
 export function buildMessageArray(
   allocations: BudgetAllocation[],
-  getMessages: (ids: string[]) => SimpleMessage[]
+  getMessages: (ids: string[], segment: Segment) => SimpleMessage[]
 ): AssembledMessage[] {
   const result: AssembledMessage[] = [];
 
@@ -114,7 +164,7 @@ export function buildMessageArray(
   for (const alloc of allocations) {
     switch (alloc.tier) {
       case "active": {
-        activeMessages = getMessages(alloc.segment.messageIds);
+        activeMessages = getMessages(alloc.segment.messageIds, alloc.segment);
         // If active exceeds budget, take most recent messages
         if (alloc.allocatedTokens < alloc.segment.tokenCount) {
           let tokens = 0;
@@ -130,12 +180,12 @@ export function buildMessageArray(
         break;
       }
       case "full": {
-        const msgs = getMessages(alloc.segment.messageIds);
+        const msgs = getMessages(alloc.segment.messageIds, alloc.segment);
         fullSegmentMessages.push({ segment: alloc.segment, messages: msgs });
         break;
       }
       case "partial": {
-        const msgs = getMessages(alloc.segment.messageIds);
+        const msgs = getMessages(alloc.segment.messageIds, alloc.segment);
         // Take summary + recent messages that fit
         summaryBlocks.push(`[Prior context — ${alloc.segment.topic}: ${alloc.segment.summary}]`);
         const recentBudget = alloc.allocatedTokens - (alloc.segment.summaryTokens || 0);

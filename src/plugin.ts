@@ -307,7 +307,7 @@ export default function dendrite(api: any) {
       }
 
       const budgets = allocateBudgets(scored, tokenBudget - pluginConfig.reserveTokens, pluginConfig.reserveTokens);
-      const assembled = buildMessageArray(budgets, (ids) => state.segmenter.getMessages(ids));
+      const assembled = buildMessageArray(budgets, (ids, _segment) => state.segmenter.getMessages(ids));
 
       const systemPreamble = assembled.filter(m => m.role === "system").map(m => m.content).join("\n\n");
       const conversationMessages = assembled

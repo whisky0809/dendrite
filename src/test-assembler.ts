@@ -63,6 +63,87 @@ assert(budgetTiny[0].tier === "active", "tiny budget: active tier present");
 assert(budgetTiny[0].allocatedTokens > 200, "tiny budget: active gets more than totalBudget alone (reserveTokens kicks in)");
 assert(budgetTiny[0].allocatedTokens <= 500, "tiny budget: active capped at its own tokenCount");
 
+// ── Pinned recent segments ──
+console.log("\n  pinned recent segments:");
+
+const pinnedA = createSegment("pinned-recent-1");
+pinnedA.tokenCount = 500;
+pinnedA.status = "closed";
+pinnedA.summary = "Recent topic A";
+pinnedA.summaryTokens = 15;
+pinnedA.lastActiveAt = Date.now() - 1000;
+
+const pinnedB = createSegment("pinned-recent-2");
+pinnedB.tokenCount = 500;
+pinnedB.status = "closed";
+pinnedB.summary = "Recent topic B";
+pinnedB.summaryTokens = 15;
+pinnedB.lastActiveAt = Date.now() - 2000;
+
+const lowScoreSeg = createSegment("low-score");
+lowScoreSeg.tokenCount = 500;
+lowScoreSeg.status = "closed";
+lowScoreSeg.summary = "Low score topic";
+lowScoreSeg.summaryTokens = 15;
+lowScoreSeg.lastActiveAt = Date.now() - 100000;
+
+const scoredPinned: ScoredSegment[] = [
+  { segment: activeSeg, score: 1.0, semanticScore: 1, recencyScoreValue: 1 },
+  // lowScoreSeg is scored higher than pinned, but pinned should still be guaranteed
+  { segment: lowScoreSeg, score: 0.9, semanticScore: 0.9, recencyScoreValue: 0.5 },
+  { segment: pinnedA, score: 0.1, semanticScore: 0.05, recencyScoreValue: 0.2 },
+  { segment: pinnedB, score: 0.05, semanticScore: 0.02, recencyScoreValue: 0.1 },
+];
+
+const pinnedBudgets = allocateBudgets(scoredPinned, 2000, 500, {
+  currentSessionId: undefined,
+  pinRecentSegments: 2,
+  maxCrossSessionBudgetRatio: 0.3,
+  pinnedSegmentIds: [pinnedA.id, pinnedB.id],
+});
+const pinnedTiers = pinnedBudgets.reduce((acc, b) => { acc[b.segment.id] = b.tier; return acc; }, {} as Record<string, string>);
+assert(pinnedTiers[pinnedA.id] !== "excluded", "pinned segment A not excluded");
+assert(pinnedTiers[pinnedB.id] !== "excluded", "pinned segment B not excluded");
+
+// ── Cross-session budget cap ──
+console.log("\n  cross-session budget cap:");
+
+const crossSeg1 = createSegment("cross-1");
+crossSeg1.tokenCount = 5000;
+crossSeg1.status = "closed";
+crossSeg1.summary = "Cross session 1";
+crossSeg1.summaryTokens = 20;
+crossSeg1.sessionId = "past-session";
+crossSeg1.transcriptPath = "/tmp/past.jsonl";
+crossSeg1.lastActiveAt = Date.now() - 60000;
+
+const crossSeg2 = createSegment("cross-2");
+crossSeg2.tokenCount = 5000;
+crossSeg2.status = "closed";
+crossSeg2.summary = "Cross session 2";
+crossSeg2.summaryTokens = 20;
+crossSeg2.sessionId = "past-session";
+crossSeg2.transcriptPath = "/tmp/past.jsonl";
+crossSeg2.lastActiveAt = Date.now() - 120000;
+
+const scoredCross: ScoredSegment[] = [
+  { segment: activeSeg, score: 1.0, semanticScore: 1, recencyScoreValue: 1 },
+  { segment: crossSeg1, score: 0.9, semanticScore: 0.95, recencyScoreValue: 0.8 },
+  { segment: crossSeg2, score: 0.8, semanticScore: 0.85, recencyScoreValue: 0.7 },
+];
+
+// Total budget 10000, cross-session cap 0.3 = 3000 tokens max for cross-session
+const crossBudgets = allocateBudgets(scoredCross, 10000, 500, {
+  currentSessionId: "current-session",
+  pinRecentSegments: 0,
+  maxCrossSessionBudgetRatio: 0.3,
+  pinnedSegmentIds: [],
+});
+const crossTokensUsed = crossBudgets
+  .filter(b => b.segment.sessionId !== undefined)
+  .reduce((sum, b) => sum + b.allocatedTokens, 0);
+assert(crossTokensUsed <= 10000 * 0.3, `cross-session tokens (${crossTokensUsed}) within 30% cap (${10000 * 0.3})`);
+
 // ── buildMessageArray ──
 console.log("\n  buildMessageArray:");
 
@@ -82,7 +163,7 @@ const allocations: BudgetAllocation[] = [
   { segment: closedA, tier: "summary", allocatedTokens: 20, scored: scored[1] },
 ];
 
-const result = buildMessageArray(allocations, (ids) =>
+const result = buildMessageArray(allocations, (ids, _segment) =>
   ids.map(id => messages.get(id)!).filter(Boolean)
 );
 
