@@ -18,6 +18,7 @@ import {
   type SegmentIndex,
 } from "./types.js";
 import { DendriteStore } from "./store.js";
+import { SegmentPool } from "./segment-pool.js";
 import { registerDendriteCli } from "./cli.js";
 
 // ── AgentMessage <-> SimpleMessage conversion ──
@@ -56,6 +57,7 @@ interface SessionState {
   indexDirty: boolean;
   embeddingsAvailable: boolean;
   driftAvailable: boolean;
+  sessionFile: string;
 }
 
 const sessions = new Map<string, SessionState>();
@@ -73,6 +75,7 @@ function createSessionState(config: DendriteConfig): SessionState {
     indexDirty: false,
     embeddingsAvailable: true,
     driftAvailable: true,
+    sessionFile: "",
   };
 }
 
@@ -94,6 +97,7 @@ export default function dendrite(api: any) {
   const configDir = process.env.HOME + "/.openclaw";
   const configPath = configDir + "/openclaw.json";
   const store = new DendriteStore(configDir, configPath);
+  const pool = new SegmentPool(configDir);
 
   const log = (msg: string, data?: any) => api.logger?.info?.(`dendrite: ${msg}${data ? " " + JSON.stringify(data) : ""}`);
   const debug = (msg: string, data?: any) => api.logger?.debug?.(`dendrite: ${msg}${data ? " " + JSON.stringify(data) : ""}`);
@@ -142,6 +146,7 @@ export default function dendrite(api: any) {
     async bootstrap(params: { sessionId: string; sessionFile: string }) {
       debug("bootstrap called", { sessionId: params.sessionId, hasFile: !!params.sessionFile });
       const state = getSession(params.sessionId, pluginConfig);
+      state.sessionFile = params.sessionFile || "";
 
       try {
         if (params.sessionFile) {
@@ -221,6 +226,26 @@ export default function dendrite(api: any) {
                 state.embeddingsAvailable = false;
                 log("embedding unavailable, falling back to recency-only scoring", { model: pluginConfig.embeddingModel });
               }
+
+              // Eager summary generation for the closed segment
+              if (!closedSeg.summary) {
+                try {
+                  const summaryMsgs = state.segmenter.getMessages(closedSeg.messageIds);
+                  closedSeg.summary = await generateSummary(closedSeg.topic, summaryMsgs, pluginConfig.summaryModel, await getOpenRouterKey());
+                  closedSeg.summaryTokens = estimateTokens(closedSeg.summary);
+                } catch {
+                  // Summary will be generated lazily in assemble() as fallback
+                }
+              }
+            }
+
+            // Persist to pool (only if we have a session file path)
+            if (state.sessionFile) {
+              try {
+                pool.persistSession(params.sessionId, state.segmenter.segments, "default", state.sessionFile);
+              } catch {
+                // Non-critical
+              }
             }
           }
         } catch (err: any) {
@@ -232,6 +257,28 @@ export default function dendrite(api: any) {
 
       if (result.action === "force-split") {
         state.indexDirty = true;
+
+        // Eager summary for force-split closed segment
+        const forceClosed = state.segmenter.segments[state.segmenter.segments.length - 2];
+        if (forceClosed && !forceClosed.summary) {
+          try {
+            const summaryMsgs = state.segmenter.getMessages(forceClosed.messageIds);
+            forceClosed.summary = await generateSummary(forceClosed.topic, summaryMsgs, pluginConfig.summaryModel, await getOpenRouterKey());
+            forceClosed.summaryTokens = estimateTokens(forceClosed.summary);
+          } catch { /* fallback in assemble */ }
+        }
+        // Compute embedding for force-split segment if missing
+        if (forceClosed && forceClosed.embedding.length === 0) {
+          const segText = state.segmenter.getMessages(forceClosed.messageIds).map(m => m.content).join(" ");
+          const embedding = await getEmbedding(segText, pluginConfig.embeddingModel, await getGoogleKey());
+          if (embedding.length > 0) forceClosed.embedding = embedding;
+        }
+        // Persist to pool (only if we have a session file path)
+        if (state.sessionFile) {
+          try {
+            pool.persistSession(params.sessionId, state.segmenter.segments, "default", state.sessionFile);
+          } catch { /* non-critical */ }
+        }
       }
 
       if (state.totalTurns % 5 === 0) {
@@ -273,7 +320,8 @@ export default function dendrite(api: any) {
 
     async assemble(params: { sessionId: string; messages: any[]; tokenBudget?: number }) {
       const state = getSession(params.sessionId, pluginConfig);
-      const segments = state.segmenter.segments;
+      const currentSegments = state.segmenter.segments;
+      const segments = pool.getCombinedSegments(currentSegments, params.sessionId);
       debug("assemble called", { sessionId: params.sessionId, segments: segments.length, tokenBudget: params.tokenBudget, msgCount: params.messages?.length });
 
       if (segments.length < 2) {
@@ -299,6 +347,8 @@ export default function dendrite(api: any) {
       for (const entry of scored) {
         const seg = entry.segment;
         if (seg.status === "closed" && !seg.summary && summarizedThisTurn < 1) {
+          // Skip cross-session segments — they can't be lazily summarized here
+          if (seg.sessionId && seg.transcriptPath) continue;
           const msgs = state.segmenter.getMessages(seg.messageIds);
           seg.summary = await generateSummary(seg.topic, msgs, pluginConfig.summaryModel, await getOpenRouterKey());
           seg.summaryTokens = estimateTokens(seg.summary);
@@ -306,8 +356,25 @@ export default function dendrite(api: any) {
         }
       }
 
-      const budgets = allocateBudgets(scored, tokenBudget - pluginConfig.reserveTokens, pluginConfig.reserveTokens);
-      const assembled = buildMessageArray(budgets, (ids, _segment) => state.segmenter.getMessages(ids));
+      // Find the most recent N closed segments from the current session for pinning
+      const currentClosed = currentSegments
+        .filter(s => s.status === "closed")
+        .sort((a, b) => b.lastActiveAt - a.lastActiveAt)
+        .slice(0, pluginConfig.pinRecentSegments);
+      const pinnedSegmentIds = currentClosed.map(s => s.id);
+
+      const budgets = allocateBudgets(scored, tokenBudget - pluginConfig.reserveTokens, pluginConfig.reserveTokens, {
+        currentSessionId: params.sessionId,
+        pinRecentSegments: pluginConfig.pinRecentSegments,
+        maxCrossSessionBudgetRatio: pluginConfig.maxCrossSessionBudgetRatio,
+        pinnedSegmentIds,
+      });
+      const assembled = buildMessageArray(budgets, (ids, segment) => {
+        if (segment.sessionId && segment.transcriptPath) {
+          return pool.loadMessages(segment.transcriptPath, ids);
+        }
+        return state.segmenter.getMessages(ids);
+      });
 
       const systemPreamble = assembled.filter(m => m.role === "system").map(m => m.content).join("\n\n");
       const conversationMessages = assembled
