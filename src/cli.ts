@@ -2,8 +2,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
-import { DEFAULT_CONFIG, type DendriteConfig, type TurnSnapshot } from "./types.js";
+import { DEFAULT_CONFIG, type DendriteConfig, type TurnSnapshot, type SimpleMessage } from "./types.js";
 import { DendriteStore } from "./store.js";
+import { generateSummary } from "./summarizer.js";
 
 // ── Config schema info (derived from openclaw.plugin.json) ──
 
@@ -121,6 +122,138 @@ function formatPeekSummary(snapshot: TurnSnapshot): string {
   lines.push(snapshot.assembledContext);
 
   return lines.join("\n");
+}
+
+// ── Rebuild ──
+
+export interface RebuildOptions {
+  agentId: string;
+  configDir: string;
+  force: boolean;
+  dryRun: boolean;
+  summaryModel: string;
+  summaryApiKey: string;
+  logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void };
+}
+
+export interface RebuildResult {
+  sessionsProcessed: number;
+  segmentsTotal: number;
+  summariesGenerated: number;
+}
+
+export async function rebuildSessions(opts: RebuildOptions): Promise<RebuildResult> {
+  const sessionsDir = path.join(opts.configDir, "agents", opts.agentId, "sessions");
+  const segmentsDir = path.join(opts.configDir, "dendrite", "segments");
+
+  if (!fs.existsSync(sessionsDir)) {
+    opts.logger.warn(`No sessions directory found: ${sessionsDir}`);
+    return { sessionsProcessed: 0, segmentsTotal: 0, summariesGenerated: 0 };
+  }
+
+  const transcriptFiles = fs.readdirSync(sessionsDir).filter(f => f.endsWith(".jsonl"));
+  let sessionsProcessed = 0;
+  let segmentsTotal = 0;
+  let summariesGenerated = 0;
+
+  for (const file of transcriptFiles) {
+    const sessionId = file.replace(".jsonl", "");
+    const segmentFile = path.join(segmentsDir, `${sessionId}.json`);
+
+    if (!opts.force && fs.existsSync(segmentFile)) {
+      continue;
+    }
+
+    const transcriptPath = path.join(sessionsDir, file);
+    const content = fs.readFileSync(transcriptPath, "utf-8");
+    const lines = content.split("\n").filter(Boolean);
+
+    // Find last segment-index entry
+    let lastIndex: { segments: any[] } | null = null;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const entry = JSON.parse(lines[i]);
+        if (entry.dendrite === "segment-index") {
+          lastIndex = { segments: entry.segments };
+          break;
+        }
+      } catch { /* skip */ }
+    }
+
+    if (!lastIndex || lastIndex.segments.length === 0) {
+      continue;
+    }
+
+    const closedSegments = lastIndex.segments.filter((s: any) => s.status === "closed");
+    if (closedSegments.length === 0) continue;
+
+    // Generate summaries for segments missing them
+    for (const seg of closedSegments) {
+      if (!seg.summary && opts.summaryApiKey && !opts.dryRun) {
+        try {
+          // Load messages for this segment from transcript
+          const idSet = new Set(seg.messageIds as string[]);
+          const msgs: SimpleMessage[] = [];
+          for (const line of lines) {
+            try {
+              const entry = JSON.parse(line);
+              if (entry.id && idSet.has(entry.id)) {
+                const role = entry.role;
+                if (role !== "user" && role !== "assistant" && role !== "toolResult") continue;
+                const text = typeof entry.content === "string"
+                  ? entry.content
+                  : Array.isArray(entry.content)
+                    ? entry.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
+                    : "";
+                if (text) msgs.push({ id: entry.id, role, content: text, timestamp: entry.timestamp || 0 });
+              }
+            } catch { /* skip */ }
+          }
+          if (msgs.length > 0) {
+            // Retry with exponential backoff for rate limits
+            let lastErr: any;
+            for (let attempt = 0; attempt < 3; attempt++) {
+              try {
+                seg.summary = await generateSummary(seg.topic, msgs, opts.summaryModel, opts.summaryApiKey);
+                seg.summaryTokens = Math.ceil(seg.summary.length / 4);
+                summariesGenerated++;
+                lastErr = null;
+                break;
+              } catch (err: any) {
+                lastErr = err;
+                if (attempt < 2) {
+                  const delay = 1000 * Math.pow(2, attempt); // 1s, 2s
+                  await new Promise(r => setTimeout(r, delay));
+                }
+              }
+            }
+            if (lastErr) {
+              opts.logger.warn(`Failed to generate summary for ${seg.id} after 3 attempts: ${lastErr?.message || lastErr}`);
+            }
+          }
+        } catch (err: any) {
+          opts.logger.warn(`Failed to process segment ${seg.id}: ${err?.message || err}`);
+        }
+      }
+    }
+
+    sessionsProcessed++;
+    segmentsTotal += closedSegments.length;
+
+    if (opts.dryRun) continue;
+
+    fs.mkdirSync(segmentsDir, { recursive: true });
+    const fileData = {
+      sessionId,
+      agentId: opts.agentId,
+      transcriptPath,
+      exportedAt: Date.now(),
+      segments: closedSegments,
+    };
+    fs.writeFileSync(segmentFile, JSON.stringify(fileData, null, 2));
+  }
+
+  return { sessionsProcessed, segmentsTotal, summariesGenerated };
 }
 
 // ── CLI registration ──
@@ -385,5 +518,48 @@ export function registerDendriteCli(ctx: {
       const snapshot = store.getTurn(sessionId, turns[idx].filename);
       if (!snapshot) { console.error("Failed to load turn."); process.exit(1); }
       console.log("\n" + formatPeekSummary(snapshot));
+    });
+
+  // ── rebuild ──
+  root
+    .command("rebuild")
+    .description("Backfill per-session segment files from existing transcripts")
+    .option("--dry-run", "Report what would be processed without writing")
+    .option("--force", "Reprocess sessions even if segment files exist")
+    .option("--agent <id>", "Agent ID (defaults to agent with default: true)")
+    .action(async (opts: { dryRun?: boolean; force?: boolean; agent?: string }) => {
+      let agentId = opts.agent;
+
+      if (!agentId) {
+        // Find default agent from openclaw.json
+        try {
+          const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+          const agents = raw?.agents?.list || [];
+          const defaultAgent = agents.find((a: any) => a.default === true);
+          agentId = defaultAgent?.id;
+        } catch { /* */ }
+      }
+
+      if (!agentId) {
+        console.error("No agent specified and no default agent found in openclaw.json");
+        process.exit(1);
+      }
+
+      console.log(`Rebuilding segment files for agent: ${agentId}`);
+      if (opts.dryRun) console.log("(dry run — no files will be written)\n");
+
+      const effective = store.getEffectiveConfig();
+
+      const result = await rebuildSessions({
+        agentId,
+        configDir,
+        force: !!opts.force,
+        dryRun: !!opts.dryRun,
+        summaryModel: effective.summaryModel,
+        summaryApiKey: process.env.OPENROUTER_API_KEY || "",
+        logger: { info: console.log, warn: console.warn, error: console.error },
+      });
+
+      console.log(`\nProcessed ${result.sessionsProcessed} sessions, ${result.segmentsTotal} segments, generated ${result.summariesGenerated} summaries`);
     });
 }
