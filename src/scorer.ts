@@ -21,13 +21,11 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /**
- * Recency score: exponential decay based on turns since segment was last active.
+ * Recency score: exponential decay based on time since segment was last active.
  * Returns 1.0 for the most recent, decaying toward 0.
- * Half-life of ~10 turns.
  */
-export function recencyScore(turnsSinceActive: number): number {
-  const halfLife = 10;
-  return Math.pow(0.5, turnsSinceActive / halfLife);
+export function recencyScore(msSinceActive: number, halfLifeMs: number): number {
+  return Math.pow(0.5, msSinceActive / halfLifeMs);
 }
 
 /**
@@ -41,11 +39,11 @@ export function recencyScore(turnsSinceActive: number): number {
 export function scoreSegments(
   segments: Segment[],
   queryEmbedding: number[],
-  totalTurns: number,
+  halfLifeMs: number,
   alpha: number
 ): ScoredSegment[] {
+  const now = Date.now();
   const scored: ScoredSegment[] = segments.map((segment) => {
-    // Active segment always wins
     if (segment.status === "active") {
       return { segment, score: 1.0, semanticScore: 1.0, recencyScoreValue: 1.0 };
     }
@@ -54,25 +52,16 @@ export function scoreSegments(
       ? Math.max(0, cosineSimilarity(segment.embedding, queryEmbedding))
       : 0;
 
-    // Calculate turns since last active using actual timestamps.
-    // We estimate the average turn duration from totalTurns and the time span,
-    // then derive turnsSince from the segment's lastActiveAt.
-    const now = Date.now();
-    const oldestSegment = segments.reduce((oldest, s) =>
-      s.lastActiveAt < oldest.lastActiveAt ? s : oldest, segments[0]);
-    const timeSpan = now - oldestSegment.lastActiveAt;
-    const avgTurnDuration = totalTurns > 1 ? timeSpan / totalTurns : 60000; // fallback: 1 min
-    const timeSinceActive = now - segment.lastActiveAt;
-    const turnsSince = avgTurnDuration > 0 ? timeSinceActive / avgTurnDuration : 0;
+    const msSinceActive = now - segment.lastActiveAt;
+    const recency = recencyScore(msSinceActive, halfLifeMs);
 
-    const recency = recencyScore(turnsSince);
-
-    const score = alpha * semantic + (1 - alpha) * recency;
+    // If segment has no embedding, use recency only
+    const effectiveAlpha = segment.embedding.length > 0 ? alpha : 0;
+    const score = effectiveAlpha * semantic + (1 - effectiveAlpha) * recency;
 
     return { segment, score, semanticScore: semantic, recencyScoreValue: recency };
   });
 
-  // Sort: active first, then by score descending
   scored.sort((a, b) => {
     if (a.segment.status === "active") return -1;
     if (b.segment.status === "active") return 1;

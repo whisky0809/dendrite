@@ -291,7 +291,7 @@ export default function dendrite(api: any) {
       const scored = scoreSegments(
         segments,
         state.queryEmbedding,
-        state.totalTurns,
+        pluginConfig.recencyHalfLifeMs,
         effectiveAlpha
       );
 
