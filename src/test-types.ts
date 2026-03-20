@@ -1,4 +1,4 @@
-import { createSegment, estimateTokens, extractTextContent, isUserMessage } from "./types.js";
+import { createSegment, estimateTokens, extractTextContent, isUserMessage, DEFAULT_CONFIG } from "./types.js";
 
 let passed = 0;
 let failed = 0;
@@ -47,6 +47,25 @@ assert(extractTextContent(assistantMsg) === "response", "extractTextContent: ass
 // isUserMessage
 assert(isUserMessage(userMsg) === true, "isUserMessage: user message");
 assert(isUserMessage(assistantMsg) === false, "isUserMessage: assistant message");
+
+// ── New cross-session fields ──
+console.log("\n  cross-session Segment fields:");
+
+const crossSeg = createSegment("cross-session-topic");
+assert(crossSeg.sessionId === undefined, "sessionId defaults to undefined");
+assert(crossSeg.transcriptPath === undefined, "transcriptPath defaults to undefined");
+
+crossSeg.sessionId = "test-session-id";
+crossSeg.transcriptPath = "/tmp/test.jsonl";
+assert(crossSeg.sessionId === "test-session-id", "sessionId can be set");
+assert(crossSeg.transcriptPath === "/tmp/test.jsonl", "transcriptPath can be set");
+
+// ── New config fields ──
+console.log("\n  cross-session config defaults:");
+assert(DEFAULT_CONFIG.pinRecentSegments === 3, "pinRecentSegments default is 3");
+assert(DEFAULT_CONFIG.maxCrossSessionBudgetRatio === 0.3, "maxCrossSessionBudgetRatio default is 0.3");
+assert(DEFAULT_CONFIG.recencyHalfLifeMs === 86400000, "recencyHalfLifeMs default is 86400000 (1 day)");
+assert(DEFAULT_CONFIG.reserveTokens === 16384, "reserveTokens bumped to 16384");
 
 console.log(`\n${"=".repeat(40)}`);
 console.log(`Results: ${passed} passed, ${failed} failed`);

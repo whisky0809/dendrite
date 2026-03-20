@@ -21,6 +21,8 @@ export interface Segment {
   summaryTokens: number;
   lastActiveAt: number;
   status: "active" | "closed";
+  sessionId?: string;
+  transcriptPath?: string;
 }
 
 export interface SegmentIndex {
@@ -55,6 +57,9 @@ export interface DendriteConfig {
   reserveTokens: number;
   maxSegmentMessages: number;
   queryWindowSize: number;
+  pinRecentSegments: number;
+  maxCrossSessionBudgetRatio: number;
+  recencyHalfLifeMs: number;
 }
 
 export const DEFAULT_CONFIG: DendriteConfig = {
@@ -64,9 +69,12 @@ export const DEFAULT_CONFIG: DendriteConfig = {
   driftThreshold: 0.7,
   minMessagesBeforeDrift: 3,
   relevanceAlpha: 0.7,
-  reserveTokens: 8192,
+  reserveTokens: 16384,
   maxSegmentMessages: 80,
   queryWindowSize: 5,
+  pinRecentSegments: 3,
+  maxCrossSessionBudgetRatio: 0.3,
+  recencyHalfLifeMs: 86400000,
 };
 
 // ── Turn snapshot (persisted by CLI store) ──

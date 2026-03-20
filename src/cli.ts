@@ -17,6 +17,9 @@ const CONFIG_TYPES: Record<keyof DendriteConfig, "string" | "number" | "integer"
   reserveTokens: "integer",
   maxSegmentMessages: "integer",
   queryWindowSize: "integer",
+  pinRecentSegments: "integer",
+  maxCrossSessionBudgetRatio: "number",
+  recencyHalfLifeMs: "integer",
 };
 
 export function validateConfigKey(key: string): boolean {
