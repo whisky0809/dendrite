@@ -40,11 +40,35 @@ function toAgentMessage(msg: { role: string; content: string; timestamp: number 
   if (msg.role === "system") {
     return null;
   }
+  // Convert toolResult to user role when we don't have the original structural message.
+  // This prevents emitting broken role:"tool" messages with no matching tool_call_id.
+  const safeRole = msg.role === "toolResult" ? "user" : msg.role;
+  const prefix = msg.role === "toolResult" ? "[Tool result] " : "";
   return {
-    role: msg.role as "user" | "assistant",
-    content: [{ type: "text", text: msg.content }],
+    role: safeRole,
+    content: [{ type: "text", text: prefix + msg.content }],
     timestamp: msg.timestamp,
   };
+}
+
+// ── Original message lookup for lossless assembly ──
+
+function buildOriginalLookup(messages: any[]): Map<string, any[]> {
+  const map = new Map<string, any[]>();
+  for (const msg of messages) {
+    const key = `${msg.role}:${msg.timestamp}`;
+    const arr = map.get(key);
+    if (arr) arr.push(msg);
+    else map.set(key, [msg]);
+  }
+  return map;
+}
+
+function lookupOriginal(map: Map<string, any[]>, role: string, timestamp: number): any | null {
+  const key = `${role}:${timestamp}`;
+  const arr = map.get(key);
+  if (!arr || arr.length === 0) return null;
+  return arr.shift()!;
 }
 
 // ── Session state ──
@@ -377,9 +401,13 @@ export default function dendrite(api: any) {
       });
 
       const systemPreamble = assembled.filter(m => m.role === "system").map(m => m.content).join("\n\n");
+      const originalLookup = buildOriginalLookup(params.messages);
       const conversationMessages = assembled
         .filter(m => m.role !== "system")
-        .map(m => toAgentMessage(m))
+        .map(m => {
+          const original = lookupOriginal(originalLookup, m.role, m.timestamp);
+          return original || toAgentMessage(m);
+        })
         .filter(Boolean);
 
       const estimatedTokens = budgets.reduce((sum, b) => sum + b.allocatedTokens, 0);
