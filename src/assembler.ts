@@ -175,6 +175,10 @@ export function buildMessageArray(
             trimmed.unshift(activeMessages[i]);
             tokens += msgTokens;
           }
+          // Drop orphaned leading toolResults (their assistant was trimmed away)
+          while (trimmed.length > 0 && trimmed[0].role === "toolResult") {
+            trimmed.shift();
+          }
           activeMessages = trimmed;
         }
         break;
@@ -196,6 +200,10 @@ export function buildMessageArray(
           if (tokens + t > recentBudget) break;
           recent.unshift(msgs[i]);
           tokens += t;
+        }
+        // Drop orphaned leading toolResults (their assistant was trimmed away)
+        while (recent.length > 0 && recent[0].role === "toolResult") {
+          recent.shift();
         }
         partialSegments.push({ allocation: alloc, messages: recent });
         break;

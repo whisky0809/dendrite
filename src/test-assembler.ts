@@ -179,6 +179,53 @@ assert(typeof preamble.content === "string" && preamble.content.includes("topic-
 const activeMessages = result.filter(m => m.role === "user" && typeof m.content === "string" && m.content.includes("Active topic"));
 assert(activeMessages.length === 1, "buildMessageArray: active messages included");
 
+// ── Atomic tool-group trimming ──
+console.log("\n  atomic tool-group trimming:");
+
+// Make the assistant message large so trimming from the end excludes it but keeps the toolResults
+const toolAssistant: SimpleMessage = { id: "ta1", role: "assistant", content: "x".repeat(400), timestamp: 10 };
+const toolResult1: SimpleMessage = { id: "tr1", role: "toolResult", content: "command output here", timestamp: 11 };
+const toolResult2: SimpleMessage = { id: "tr2", role: "toolResult", content: "second result", timestamp: 12 };
+const afterTool: SimpleMessage = { id: "at1", role: "user", content: "Thanks for running that", timestamp: 13 };
+const afterReply: SimpleMessage = { id: "ar1", role: "assistant", content: "You're welcome", timestamp: 14 };
+
+const toolSeg = createSegment("tool-topic");
+toolSeg.tokenCount = 5000; // way over budget to force trimming
+toolSeg.status = "active";
+toolSeg.messageIds = ["ta1", "tr1", "tr2", "at1", "ar1"];
+
+const toolMsgMap = new Map<string, SimpleMessage>([
+  ["ta1", toolAssistant], ["tr1", toolResult1], ["tr2", toolResult2],
+  ["at1", afterTool], ["ar1", afterReply],
+]);
+
+// Budget so tight only last ~2 messages fit, which would normally slice
+// between the assistant tool call and its results
+const toolAllocations: BudgetAllocation[] = [
+  { segment: toolSeg, tier: "active", allocatedTokens: 50, scored: scored[0] },
+];
+
+const toolResult = buildMessageArray(toolAllocations, (ids) =>
+  ids.map(id => toolMsgMap.get(id)!).filter(Boolean)
+);
+
+// No message in the result should be a toolResult without a preceding assistant
+const nonSystemMsgs = toolResult.filter(m => m.role !== "system");
+if (nonSystemMsgs.length > 0) {
+  assert(nonSystemMsgs[0].role !== "toolResult", "trim: no orphaned leading toolResult");
+}
+
+// If toolResults are present, an assistant must precede them
+let lastNonToolResult = -1;
+let orphanedToolResult = false;
+for (let i = 0; i < nonSystemMsgs.length; i++) {
+  if (nonSystemMsgs[i].role !== "toolResult") lastNonToolResult = i;
+  if (nonSystemMsgs[i].role === "toolResult" && lastNonToolResult === -1) {
+    orphanedToolResult = true;
+  }
+}
+assert(!orphanedToolResult, "trim: no toolResult before any assistant/user message");
+
 console.log(`\n${"=".repeat(40)}`);
 console.log(`Results: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
