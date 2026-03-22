@@ -26,7 +26,17 @@ import { registerDendriteCli } from "./cli.js";
 function toSimpleMessage(msg: any, index: number): SimpleMessage | null {
   const role = msg.role;
   if (role !== "user" && role !== "assistant" && role !== "toolResult") return null;
-  const content = extractTextContent(msg);
+  let content = extractTextContent(msg);
+  // Assistant messages with only tool calls have no text content.
+  // Generate a placeholder so they're tracked by the segmenter and stay
+  // paired with their toolResult messages.
+  if (!content && role === "assistant" && Array.isArray(msg.content)) {
+    const toolCalls = msg.content.filter((b: any) => b.type === "toolCall");
+    if (toolCalls.length > 0) {
+      const names = toolCalls.map((t: any) => t.name || "unknown").join(", ");
+      content = `[Tool calls: ${names}]`;
+    }
+  }
   if (!content) return null;
   return {
     id: msg.id || `msg_${index}_${msg.timestamp || Date.now()}`,
@@ -40,9 +50,12 @@ function toAgentMessage(msg: { role: string; content: string; timestamp: number 
   if (msg.role === "system") {
     return null;
   }
+  // toolResult without an original becomes a user message to avoid broken tool pairing
+  const safeRole = msg.role === "toolResult" ? "user" : msg.role;
+  const prefix = msg.role === "toolResult" ? "[Tool result] " : "";
   return {
-    role: msg.role as "user" | "assistant",
-    content: [{ type: "text", text: msg.content }],
+    role: safeRole as "user" | "assistant",
+    content: [{ type: "text", text: prefix + msg.content }],
     timestamp: msg.timestamp,
   };
 }
@@ -99,7 +112,20 @@ export default function dendrite(api: any) {
   const store = new DendriteStore(configDir, configPath);
   const pool = new SegmentPool(configDir);
 
-  const log = (msg: string, data?: any) => api.logger?.info?.(`dendrite: ${msg}${data ? " " + JSON.stringify(data) : ""}`);
+  const _logFile = "/tmp/dendrite-debug.log";
+  const _writeLog = async (line: string) => {
+    try {
+      const fs = await import("node:fs");
+      fs.appendFileSync(_logFile, line);
+    } catch {}
+  };
+  // Write a startup marker immediately
+  _writeLog(`${new Date().toISOString()} dendrite: plugin function entered\n`);
+  const log = (msg: string, data?: any) => {
+    const line = `${new Date().toISOString()} dendrite: ${msg}${data ? " " + JSON.stringify(data) : ""}\n`;
+    api.logger?.info?.(line.trim());
+    _writeLog(line);
+  };
   const debug = (msg: string, data?: any) => api.logger?.debug?.(`dendrite: ${msg}${data ? " " + JSON.stringify(data) : ""}`);
 
   // ── API key resolution (lazy, cached) ──
@@ -134,7 +160,17 @@ export default function dendrite(api: any) {
     return key;
   }
 
-  debug("registering context engine", { driftModel: pluginConfig.driftModel, summaryModel: pluginConfig.summaryModel, embeddingModel: pluginConfig.embeddingModel });
+  /** Pick the right API key for the configured embedding model. */
+  async function getEmbeddingKey(): Promise<string> {
+    const model = pluginConfig.embeddingModel;
+    // Models with "/" are OpenRouter-routed (e.g. "qwen/qwen3-embedding-8b")
+    if (model.includes("/")) {
+      return getOpenRouterKey();
+    }
+    return getGoogleKey();
+  }
+
+  log("registering context engine", { driftModel: pluginConfig.driftModel, summaryModel: pluginConfig.summaryModel, embeddingModel: pluginConfig.embeddingModel });
 
   api.registerContextEngine("dendrite", () => ({
     info: {
@@ -144,7 +180,7 @@ export default function dendrite(api: any) {
     },
 
     async bootstrap(params: { sessionId: string; sessionFile: string }) {
-      debug("bootstrap called", { sessionId: params.sessionId, hasFile: !!params.sessionFile });
+      log("bootstrap called", { sessionId: params.sessionId, hasFile: !!params.sessionFile });
       const state = getSession(params.sessionId, pluginConfig);
       state.sessionFile = params.sessionFile || "";
 
@@ -170,8 +206,11 @@ export default function dendrite(api: any) {
           for (const line of lines) {
             try {
               const entry = JSON.parse(line);
-              if (entry.role === "user" || entry.role === "assistant" || entry.role === "toolResult") {
-                const simple = toSimpleMessage(entry, msgIndex++);
+              // JSONL entries wrap the message: {type:"message", message:{role, content, ...}}
+              const msg = entry.type === "message" && entry.message ? entry.message : entry;
+              const role = msg.role;
+              if (role === "user" || role === "assistant" || role === "toolResult") {
+                const simple = toSimpleMessage(msg, msgIndex++);
                 if (simple) allSimpleMessages.push(simple);
               }
             } catch { /* skip */ }
@@ -219,7 +258,7 @@ export default function dendrite(api: any) {
             if (closedSeg) {
               const segText = state.segmenter.getMessages(closedSeg.messageIds)
                 .map(m => m.content).join(" ");
-              const embedding = await getEmbedding(segText, pluginConfig.embeddingModel, await getGoogleKey());
+              const embedding = await getEmbedding(segText, pluginConfig.embeddingModel, await getEmbeddingKey());
               if (embedding.length > 0) {
                 closedSeg.embedding = embedding;
               } else {
@@ -270,7 +309,7 @@ export default function dendrite(api: any) {
         // Compute embedding for force-split segment if missing
         if (forceClosed && forceClosed.embedding.length === 0) {
           const segText = state.segmenter.getMessages(forceClosed.messageIds).map(m => m.content).join(" ");
-          const embedding = await getEmbedding(segText, pluginConfig.embeddingModel, await getGoogleKey());
+          const embedding = await getEmbedding(segText, pluginConfig.embeddingModel, await getEmbeddingKey());
           if (embedding.length > 0) forceClosed.embedding = embedding;
         }
         // Persist to pool (only if we have a session file path)
@@ -284,7 +323,7 @@ export default function dendrite(api: any) {
       if (state.totalTurns % 5 === 0) {
         const recentMsgs = state.segmenter.getRecentMessages(pluginConfig.queryWindowSize);
         const queryText = recentMsgs.map(m => m.content).join(" ");
-        const embedding = await getEmbedding(queryText, pluginConfig.embeddingModel, await getGoogleKey());
+        const embedding = await getEmbedding(queryText, pluginConfig.embeddingModel, await getEmbeddingKey());
         if (embedding.length > 0) {
           state.queryEmbedding = embedding;
         } else {
@@ -295,7 +334,7 @@ export default function dendrite(api: any) {
         if (active) {
           const activeText = state.segmenter.getMessages(active.messageIds)
             .map(m => m.content).join(" ");
-          const activeEmbed = await getEmbedding(activeText, pluginConfig.embeddingModel, await getGoogleKey());
+          const activeEmbed = await getEmbedding(activeText, pluginConfig.embeddingModel, await getEmbeddingKey());
           if (activeEmbed.length > 0) active.embedding = activeEmbed;
         }
       }
@@ -322,7 +361,7 @@ export default function dendrite(api: any) {
       const state = getSession(params.sessionId, pluginConfig);
       const currentSegments = state.segmenter.segments;
       const segments = pool.getCombinedSegments(currentSegments, params.sessionId);
-      debug("assemble called", { sessionId: params.sessionId, segments: segments.length, tokenBudget: params.tokenBudget, msgCount: params.messages?.length });
+      log("assemble called", { sessionId: params.sessionId, segments: segments.length, tokenBudget: params.tokenBudget, msgCount: params.messages?.length });
 
       if (segments.length < 2) {
         debug("passthrough — fewer than 2 segments");
@@ -377,10 +416,94 @@ export default function dendrite(api: any) {
       });
 
       const systemPreamble = assembled.filter(m => m.role === "system").map(m => m.content).join("\n\n");
+
+      // Map assembled SimpleMessages back to original AgentMessages from params.messages.
+      // Use timestamp + role as the lookup key since messages don't have stable IDs.
+      const originalByTs = new Map<number, any[]>();
+      for (const msg of params.messages) {
+        if (typeof msg.timestamp !== "number") continue;
+        const arr = originalByTs.get(msg.timestamp);
+        if (arr) arr.push(msg);
+        else originalByTs.set(msg.timestamp, [msg]);
+      }
+
+      let lookupHits = 0, lookupMisses = 0;
       const conversationMessages = assembled
         .filter(m => m.role !== "system")
-        .map(m => toAgentMessage(m))
+        .map(m => {
+          const arr = originalByTs.get(m.timestamp);
+          if (arr) {
+            const idx = arr.findIndex(orig => orig.role === m.role);
+            if (idx >= 0) {
+              lookupHits++;
+              return arr.splice(idx, 1)[0];
+            }
+          }
+          lookupMisses++;
+          log("lookup miss", { role: m.role, ts: m.timestamp, content: m.content?.slice(0, 60) });
+          // Fallback for cross-session or unmatched messages: safe text-only conversion.
+          // toolResult becomes user role to avoid broken tool pairing.
+          return toAgentMessage(m);
+        })
         .filter(Boolean);
+
+      // Repair tool pairing: OpenClaw's sanitization pipeline may drop messages
+      // that dendrite's segmenter already ingested, creating orphaned tool_calls
+      // or toolResults. Fix both directions to prevent API errors.
+      const outToolCallIds = new Set<string>();
+      const outToolResultIds = new Set<string>();
+      for (const msg of conversationMessages as any[]) {
+        if (msg.role === "assistant" && Array.isArray(msg.content)) {
+          for (const c of msg.content) {
+            if (c.type === "toolCall" && c.id) outToolCallIds.add(c.id);
+          }
+        }
+        if (msg.role === "toolResult" && msg.toolCallId) {
+          outToolResultIds.add(msg.toolCallId);
+        }
+      }
+      // Strip orphaned tool_calls from assistants
+      for (const msg of conversationMessages as any[]) {
+        if (msg.role === "assistant" && Array.isArray(msg.content)) {
+          const orphaned = msg.content.filter((c: any) =>
+            c.type === "toolCall" && c.id && !outToolResultIds.has(c.id));
+          if (orphaned.length > 0) {
+            debug("stripping orphaned tool_calls", { ids: orphaned.map((c: any) => c.id) });
+            msg.content = msg.content.filter((c: any) =>
+              !(c.type === "toolCall" && c.id && !outToolResultIds.has(c.id)));
+            if (msg.content.length === 0) {
+              msg.content = [{ type: "text", text: "[tool calls omitted]" }];
+            }
+          }
+        }
+      }
+      // Convert orphaned toolResults to user messages
+      // (Recompute tool_call IDs after stripping)
+      const finalToolCallIds = new Set<string>();
+      for (const msg of conversationMessages as any[]) {
+        if (msg.role === "assistant" && Array.isArray(msg.content)) {
+          for (const c of msg.content) {
+            if (c.type === "toolCall" && c.id) finalToolCallIds.add(c.id);
+          }
+        }
+      }
+      for (let i = 0; i < conversationMessages.length; i++) {
+        const msg = conversationMessages[i] as any;
+        if (msg.role === "toolResult" && msg.toolCallId && !finalToolCallIds.has(msg.toolCallId)) {
+          debug("converting orphaned toolResult", { toolCallId: msg.toolCallId });
+          const text = extractTextContent(msg) || "[Tool result]";
+          conversationMessages[i] = {
+            role: "user",
+            content: [{ type: "text", text: `[Tool result] ${text}` }],
+            timestamp: msg.timestamp,
+          };
+        }
+      }
+
+      log("assemble", {
+        segments: segments.length, assembled: assembled.length,
+        output: conversationMessages.length, hits: lookupHits, misses: lookupMisses,
+      });
 
       const estimatedTokens = budgets.reduce((sum, b) => sum + b.allocatedTokens, 0);
 

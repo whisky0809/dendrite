@@ -141,6 +141,8 @@ export interface AssembledMessage {
   role: "system" | "user" | "assistant" | "toolResult";
   content: string;
   timestamp: number;
+  /** SimpleMessage ID — used by plugin to map back to original AgentMessage. Absent for system/summary messages. */
+  id?: string;
 }
 
 /**
@@ -230,20 +232,20 @@ export function buildMessageArray(
   fullSegmentMessages.sort((a, b) => (a.messages[0]?.timestamp || 0) - (b.messages[0]?.timestamp || 0));
   for (const { messages } of fullSegmentMessages) {
     for (const msg of messages) {
-      result.push({ role: msg.role, content: msg.content, timestamp: msg.timestamp });
+      result.push({ id: msg.id, role: msg.role, content: msg.content, timestamp: msg.timestamp });
     }
   }
 
   // Step 3: Partial segments (recent messages)
   for (const { messages } of partialSegments) {
     for (const msg of messages) {
-      result.push({ role: msg.role, content: msg.content, timestamp: msg.timestamp });
+      result.push({ id: msg.id, role: msg.role, content: msg.content, timestamp: msg.timestamp });
     }
   }
 
   // Step 4: Active segment messages (always last, in full)
   for (const msg of activeMessages) {
-    result.push({ role: msg.role, content: msg.content, timestamp: msg.timestamp });
+    result.push({ id: msg.id, role: msg.role, content: msg.content, timestamp: msg.timestamp });
   }
 
   return result;
