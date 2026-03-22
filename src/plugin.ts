@@ -112,21 +112,12 @@ export default function dendrite(api: any) {
   const store = new DendriteStore(configDir, configPath);
   const pool = new SegmentPool(configDir);
 
-  const _logFile = "/tmp/dendrite-debug.log";
-  const _writeLog = async (line: string) => {
-    try {
-      const fs = await import("node:fs");
-      fs.appendFileSync(_logFile, line);
-    } catch {}
-  };
-  // Write a startup marker immediately
-  _writeLog(`${new Date().toISOString()} dendrite: plugin function entered\n`);
   const log = (msg: string, data?: any) => {
-    const line = `${new Date().toISOString()} dendrite: ${msg}${data ? " " + JSON.stringify(data) : ""}\n`;
-    api.logger?.info?.(line.trim());
-    _writeLog(line);
+    api.logger?.info?.(`dendrite: ${msg}${data ? " " + JSON.stringify(data) : ""}`);
   };
-  const debug = (msg: string, data?: any) => api.logger?.debug?.(`dendrite: ${msg}${data ? " " + JSON.stringify(data) : ""}`);
+  const debug = (msg: string, data?: any) => {
+    api.logger?.debug?.(`dendrite: ${msg}${data ? " " + JSON.stringify(data) : ""}`);
+  };
 
   // ── API key resolution (lazy, cached) ──
   let cachedOpenRouterKey: string | null = null;
