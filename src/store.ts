@@ -63,6 +63,28 @@ export class DendriteStore {
     });
   }
 
+  resolveSessionId(partial: string): string | null {
+    const sessions = this.listSessions();
+    const matches = sessions.filter(s => s.startsWith(partial));
+    if (matches.length === 1) return matches[0];
+    return null;
+  }
+
+  getSessionLabel(sessionId: string): string {
+    const turns = this.listTurns(sessionId);
+    if (turns.length === 0) return "(no topic)";
+    const lastTurn = turns[turns.length - 1];
+    const snapshot = this.getTurn(sessionId, lastTurn.filename);
+    if (!snapshot || snapshot.segments.length === 0) return "(no topic)";
+
+    // Prefer most recent active segment's topic
+    const active = snapshot.segments.filter(s => s.status === "active");
+    if (active.length > 0) return active[active.length - 1].topic;
+
+    // Fall back to most recent closed segment
+    return snapshot.segments[snapshot.segments.length - 1].topic;
+  }
+
   getConfig(): Partial<DendriteConfig> | null {
     if (!fs.existsSync(this.configPath)) return null;
     const raw = JSON.parse(fs.readFileSync(this.configPath, "utf-8"));
