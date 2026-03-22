@@ -471,14 +471,21 @@ export default function dendrite(api: any) {
             debug("stripping orphaned tool_calls", { ids: orphaned.map((c: any) => c.id) });
             msg.content = msg.content.filter((c: any) =>
               !(c.type === "toolCall" && c.id && !outToolResultIds.has(c.id)));
+            // If nothing left, mark for removal
             if (msg.content.length === 0) {
-              msg.content = [{ type: "text", text: "[tool calls omitted]" }];
+              (msg as any)._drop = true;
             }
           }
         }
       }
-      // Convert orphaned toolResults to user messages
-      // (Recompute tool_call IDs after stripping)
+      // Remove assistants that became empty after stripping
+      for (let i = conversationMessages.length - 1; i >= 0; i--) {
+        if ((conversationMessages[i] as any)._drop) {
+          conversationMessages.splice(i, 1);
+        }
+      }
+      // Drop orphaned toolResults entirely (atomic tool groups:
+      // if the assistant with the matching tool_call is gone, drop the result too)
       const finalToolCallIds = new Set<string>();
       for (const msg of conversationMessages as any[]) {
         if (msg.role === "assistant" && Array.isArray(msg.content)) {
@@ -487,17 +494,16 @@ export default function dendrite(api: any) {
           }
         }
       }
-      for (let i = 0; i < conversationMessages.length; i++) {
+      const beforeCount = conversationMessages.length;
+      for (let i = conversationMessages.length - 1; i >= 0; i--) {
         const msg = conversationMessages[i] as any;
         if (msg.role === "toolResult" && msg.toolCallId && !finalToolCallIds.has(msg.toolCallId)) {
-          debug("converting orphaned toolResult", { toolCallId: msg.toolCallId });
-          const text = extractTextContent(msg) || "[Tool result]";
-          conversationMessages[i] = {
-            role: "user",
-            content: [{ type: "text", text: `[Tool result] ${text}` }],
-            timestamp: msg.timestamp,
-          };
+          debug("dropping orphaned toolResult", { toolCallId: msg.toolCallId });
+          conversationMessages.splice(i, 1);
         }
+      }
+      if (conversationMessages.length < beforeCount) {
+        debug("atomic tool group cleanup", { dropped: beforeCount - conversationMessages.length });
       }
 
       log("assemble", {
