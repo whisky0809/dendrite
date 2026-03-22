@@ -40,35 +40,11 @@ function toAgentMessage(msg: { role: string; content: string; timestamp: number 
   if (msg.role === "system") {
     return null;
   }
-  // Convert toolResult to user role when we don't have the original structural message.
-  // This prevents emitting broken role:"tool" messages with no matching tool_call_id.
-  const safeRole = msg.role === "toolResult" ? "user" : msg.role;
-  const prefix = msg.role === "toolResult" ? "[Tool result] " : "";
   return {
-    role: safeRole,
-    content: [{ type: "text", text: prefix + msg.content }],
+    role: msg.role as "user" | "assistant",
+    content: [{ type: "text", text: msg.content }],
     timestamp: msg.timestamp,
   };
-}
-
-// ── Original message lookup for lossless assembly ──
-
-function buildOriginalLookup(messages: any[]): Map<string, any[]> {
-  const map = new Map<string, any[]>();
-  for (const msg of messages) {
-    const key = `${msg.role}:${msg.timestamp}`;
-    const arr = map.get(key);
-    if (arr) arr.push(msg);
-    else map.set(key, [msg]);
-  }
-  return map;
-}
-
-function lookupOriginal(map: Map<string, any[]>, role: string, timestamp: number): any | null {
-  const key = `${role}:${timestamp}`;
-  const arr = map.get(key);
-  if (!arr || arr.length === 0) return null;
-  return arr.shift()!;
 }
 
 // ── Session state ──
@@ -346,7 +322,7 @@ export default function dendrite(api: any) {
       const state = getSession(params.sessionId, pluginConfig);
       const currentSegments = state.segmenter.segments;
       const segments = pool.getCombinedSegments(currentSegments, params.sessionId);
-      log("assemble called", { sessionId: params.sessionId, segments: segments.length, tokenBudget: params.tokenBudget, msgCount: params.messages?.length });
+      debug("assemble called", { sessionId: params.sessionId, segments: segments.length, tokenBudget: params.tokenBudget, msgCount: params.messages?.length });
 
       if (segments.length < 2) {
         debug("passthrough — fewer than 2 segments");
@@ -401,69 +377,10 @@ export default function dendrite(api: any) {
       });
 
       const systemPreamble = assembled.filter(m => m.role === "system").map(m => m.content).join("\n\n");
-      const originalLookup = buildOriginalLookup(params.messages);
-      let lookupHits = 0;
-      let lookupMisses = 0;
       const conversationMessages = assembled
         .filter(m => m.role !== "system")
-        .map(m => {
-          const original = lookupOriginal(originalLookup, m.role, m.timestamp);
-          if (original) lookupHits++;
-          else {
-            lookupMisses++;
-            debug("assemble lookup miss", { role: m.role, timestamp: m.timestamp });
-          }
-          return original || toAgentMessage(m);
-        })
+        .map(m => toAgentMessage(m))
         .filter(Boolean);
-
-      // Repair orphaned tool_calls: if an assistant has tool_calls whose IDs
-      // don't have matching toolResult messages, strip those tool_calls to prevent
-      // API errors ("tool_call_id is not found").
-      const allToolResultIds = new Set<string>();
-      for (const msg of conversationMessages as any[]) {
-        if (msg.role === "toolResult" && msg.toolCallId) {
-          allToolResultIds.add(msg.toolCallId);
-        }
-      }
-      for (const msg of conversationMessages as any[]) {
-        if (msg.role === "assistant" && Array.isArray(msg.content)) {
-          const orphaned = msg.content.filter((c: any) => c.type === "toolCall" && c.id && !allToolResultIds.has(c.id));
-          if (orphaned.length > 0) {
-            debug("stripping orphaned tool_calls", { ids: orphaned.map((c: any) => c.id) });
-            msg.content = msg.content.filter((c: any) => !(c.type === "toolCall" && c.id && !allToolResultIds.has(c.id)));
-            // If stripping left only text blocks, that's fine.
-            // If it left nothing, insert a placeholder so the message isn't empty.
-            if (msg.content.length === 0) {
-              msg.content = [{ type: "text", text: "[tool calls omitted]" }];
-            }
-          }
-        }
-      }
-
-      // Also convert orphaned toolResults (no matching assistant tool_call) to user messages
-      const allToolCallIds = new Set<string>();
-      for (const msg of conversationMessages as any[]) {
-        if (msg.role === "assistant" && Array.isArray(msg.content)) {
-          for (const c of msg.content) {
-            if (c.type === "toolCall" && c.id) allToolCallIds.add(c.id);
-          }
-        }
-      }
-      for (let i = 0; i < conversationMessages.length; i++) {
-        const msg = conversationMessages[i] as any;
-        if (msg.role === "toolResult" && msg.toolCallId && !allToolCallIds.has(msg.toolCallId)) {
-          debug("converting orphaned toolResult to user", { toolCallId: msg.toolCallId });
-          const text = extractTextContent(msg) || "[Tool result]";
-          conversationMessages[i] = {
-            role: "user",
-            content: [{ type: "text", text: `[Tool result] ${text}` }],
-            timestamp: msg.timestamp,
-          };
-        }
-      }
-
-      log("assemble lookup stats", { hits: lookupHits, misses: lookupMisses, outputCount: conversationMessages.length, hasToolResults: conversationMessages.some((m: any) => m.role === "toolResult") });
 
       const estimatedTokens = budgets.reduce((sum, b) => sum + b.allocatedTokens, 0);
 
