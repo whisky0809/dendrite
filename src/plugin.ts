@@ -529,10 +529,33 @@ export default function dendrite(api: any) {
 
       // Persist turn snapshot for CLI peek tool
       try {
-        const assembledText = [
-          systemPreamble || "",
-          ...conversationMessages.map((m: any) => `${m.role}: ${typeof m.content === "string" ? m.content : ""}`),
-        ].filter(Boolean).join("\n\n");
+        // Build segment-ID lookup: message timestamp -> segment ID
+        // We use timestamp because AssembledMessage carries timestamp but not id.
+        const tsToSegment = new Map<number, string>();
+        for (const b of budgets) {
+          const msgs = state.segmenter.getMessages(b.segment.messageIds);
+          for (const msg of msgs) {
+            tsToSegment.set(msg.timestamp, b.segment.id);
+          }
+        }
+
+        // assembled (non-system) and conversationMessages share indices by construction:
+        // conversationMessages = assembled.filter(non-system).map(lookup original)
+        const assembledNonSystem = assembled.filter(m => m.role !== "system");
+        const snapshotMessages: import("./types.js").TurnSnapshotMessage[] = [];
+        for (let i = 0; i < conversationMessages.length; i++) {
+          const agentMsg = conversationMessages[i] as any;
+          const simpleMsg = assembledNonSystem[i];
+          const text = extractTextContent(agentMsg);
+          const role = (simpleMsg?.role ?? agentMsg.role) as "user" | "assistant" | "toolResult";
+          snapshotMessages.push({
+            role,
+            segmentId: simpleMsg ? (tsToSegment.get(simpleMsg.timestamp) ?? null) : null,
+            tokenCount: estimateTokens(text),
+            contentPreview: text.slice(0, 200),
+            contentFull: text,
+          });
+        }
 
         store.persistTurn({
           timestamp: Date.now(),
@@ -551,7 +574,8 @@ export default function dendrite(api: any) {
             semanticScore: b.scored.semanticScore,
             recencyScore: b.scored.recencyScoreValue,
           })),
-          assembledContext: assembledText,
+          messages: snapshotMessages,
+          systemPreamble: systemPreamble || "",
           stats: {
             tokenBudget,
             tokensUsed: estimatedTokens,
