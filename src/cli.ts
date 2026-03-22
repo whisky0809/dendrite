@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { DEFAULT_CONFIG, type DendriteConfig, type TurnSnapshot, type TurnSnapshotMessage, type SimpleMessage } from "./types.js";
+import { DEFAULT_CONFIG, estimateTokens, type DendriteConfig, type TurnSnapshot, type TurnSnapshotMessage, type SimpleMessage } from "./types.js";
 import { DendriteStore, type TurnListEntry } from "./store.js";
 import { generateSummary } from "./summarizer.js";
 
@@ -184,11 +184,11 @@ export function formatPeekDashboard(snapshot: TurnSnapshot, opts: { full: boolea
     lines.push(`\u2500\u2500 (system) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`);
     if (snapshot.systemPreamble) {
       if (opts.full) {
-        lines.push(`  system    ${snapshot.systemPreamble.length}t`);
+        lines.push(`  system    ${estimateTokens(snapshot.systemPreamble)}t`);
         lines.push(`    ${snapshot.systemPreamble}`);
       } else {
         const preview = snapshot.systemPreamble.slice(0, 200);
-        lines.push(`  system    ${snapshot.systemPreamble.length}t  "${preview}${snapshot.systemPreamble.length > 200 ? "..." : ""}"`);
+        lines.push(`  system    ${estimateTokens(snapshot.systemPreamble)}t  "${preview}${snapshot.systemPreamble.length > 200 ? "..." : ""}"`);
       }
     }
     if (systemGroup) {
@@ -607,14 +607,24 @@ export function registerDendriteCli(ctx: {
           const entry = `${shortId}  ${label}`;
           console.log(`${entry.padEnd(50)}${turns.length.toString().padStart(5)}  ${lastTime}`);
         }
-        console.log(`\nUsage: dendrite peek -s <id> [-t <turn>]`);
+        console.log(`\nUse: openclaw dendrite peek -s <id> [-t <turn>]`);
+        console.log(`     openclaw dendrite peek --last`);
         return;
       }
 
       // ── Resolve session ID ──
       const sessionId = store.resolveSessionId(opts.session);
       if (!sessionId) {
-        console.error(`No unique session matching "${opts.session}". Use a longer prefix.`);
+        const allSessions = store.listSessions();
+        const matches = allSessions.filter(s => s.startsWith(opts.session!));
+        if (matches.length > 1) {
+          console.error(`Ambiguous session prefix "${opts.session}". Matches:`);
+          for (const m of matches) {
+            console.error(`  ${m.slice(0, 8)}  ${store.getSessionLabel(m)}`);
+          }
+        } else {
+          console.error(`No session matching "${opts.session}".`);
+        }
         process.exit(1);
       }
 
