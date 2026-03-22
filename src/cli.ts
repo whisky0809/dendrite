@@ -119,7 +119,7 @@ function formatPeekSummary(snapshot: TurnSnapshot): string {
   lines.push("─".repeat(60));
   lines.push("Assembled context:");
   lines.push("─".repeat(60));
-  lines.push(snapshot.assembledContext);
+  lines.push(snapshot.assembledContext ?? "");
 
   return lines.join("\n");
 }

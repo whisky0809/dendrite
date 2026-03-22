@@ -93,12 +93,22 @@ export interface TurnSnapshotSegment {
   recencyScore: number;
 }
 
+export interface TurnSnapshotMessage {
+  role: "user" | "assistant" | "toolResult";
+  segmentId: string | null;
+  tokenCount: number;
+  contentPreview: string;
+  contentFull: string;
+}
+
 export interface TurnSnapshot {
   timestamp: number;
   turnIndex: number;
   sessionId: string;
   segments: TurnSnapshotSegment[];
-  assembledContext: string;
+  messages?: TurnSnapshotMessage[];
+  systemPreamble?: string;
+  assembledContext?: string;
   stats: {
     tokenBudget: number;
     tokensUsed: number;
