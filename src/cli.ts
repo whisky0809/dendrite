@@ -197,15 +197,18 @@ export async function rebuildSessions(opts: RebuildOptions): Promise<RebuildResu
           for (const line of lines) {
             try {
               const entry = JSON.parse(line);
-              if (entry.id && idSet.has(entry.id)) {
-                const role = entry.role;
+              // JSONL entries wrap the message: {type:"message", id:"...", message:{role, content, ...}}
+              const msg = entry.type === "message" && entry.message ? entry.message : entry;
+              const msgId = msg.id || entry.id;
+              if (msgId && idSet.has(msgId)) {
+                const role = msg.role;
                 if (role !== "user" && role !== "assistant" && role !== "toolResult") continue;
-                const text = typeof entry.content === "string"
-                  ? entry.content
-                  : Array.isArray(entry.content)
-                    ? entry.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
+                const text = typeof msg.content === "string"
+                  ? msg.content
+                  : Array.isArray(msg.content)
+                    ? msg.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
                     : "";
-                if (text) msgs.push({ id: entry.id, role, content: text, timestamp: entry.timestamp || 0 });
+                if (text) msgs.push({ id: msgId, role, content: text, timestamp: msg.timestamp || entry.timestamp || 0 });
               }
             } catch { /* skip */ }
           }

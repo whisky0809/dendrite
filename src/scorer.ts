@@ -75,11 +75,27 @@ export function scoreSegments(
  * Call embedding model to get a vector for the given text.
  * Falls back to empty vector on failure.
  */
-export async function getEmbedding(text: string, model: string, apiKey?: string): Promise<number[]> {
-  const key = apiKey || process.env.GEMINI_API_KEY || "";
+export async function getEmbedding(text: string, model: string, apiKey?: string, provider?: string): Promise<number[]> {
+  const key = apiKey || "";
   if (!key) return [];
 
   try {
+    // Route through OpenRouter for non-Google models
+    if (provider === "openrouter" || model.includes("/")) {
+      const resp = await fetch("https://openrouter.ai/api/v1/embeddings", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${key}`,
+        },
+        body: JSON.stringify({ model, input: text }),
+      });
+      if (!resp.ok) return [];
+      const data = (await resp.json()) as any;
+      return data.data?.[0]?.embedding || [];
+    }
+
+    // Google Generative AI API
     const resp = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${key}`,
       {
