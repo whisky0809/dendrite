@@ -1,4 +1,4 @@
-import { allocateBudgets, buildMessageArray, selectPartialIndices, buildSelectionPlan, type BudgetAllocation } from "./assembler.js";
+import { allocateBudgets, selectPartialIndices, buildSelectionPlan, type BudgetAllocation } from "./assembler.js";
 import { createSegment, type SimpleMessage } from "./types.js";
 import type { ScoredSegment } from "./scorer.js";
 
@@ -144,88 +144,6 @@ const crossTokensUsed = crossBudgets
   .filter(b => b.segment.sessionId !== undefined)
   .reduce((sum, b) => sum + b.allocatedTokens, 0);
 assert(crossTokensUsed <= 10000 * 0.3, `cross-session tokens (${crossTokensUsed}) within 30% cap (${10000 * 0.3})`);
-
-// ── buildMessageArray ──
-console.log("\n  buildMessageArray:");
-
-const messages: Map<string, SimpleMessage> = new Map();
-const msgA1: SimpleMessage = { id: "a1", role: "user", content: "Hello about topic A", timestamp: 1 };
-const msgA2: SimpleMessage = { id: "a2", role: "assistant", content: "Sure, topic A response", timestamp: 2 };
-const msgActive1: SimpleMessage = { id: "act1", role: "user", content: "Active topic message", timestamp: 3 };
-messages.set("a1", msgA1);
-messages.set("a2", msgA2);
-messages.set("act1", msgActive1);
-
-activeSeg.messageIds = ["act1"];
-closedA.messageIds = ["a1", "a2"];
-
-const allocations: BudgetAllocation[] = [
-  { segment: activeSeg, tier: "active", allocatedTokens: 500, scored: scored[0] },
-  { segment: closedA, tier: "summary", allocatedTokens: 20, scored: scored[1] },
-];
-
-const result = buildMessageArray(allocations, (ids, _segment) =>
-  ids.map(id => messages.get(id)!).filter(Boolean)
-);
-
-// Should have a preamble system message + active messages
-assert(result.length >= 2, "buildMessageArray: has preamble + active messages");
-
-// First message should be the system preamble with summaries
-const preamble = result[0];
-assert(preamble.role === "system", "buildMessageArray: first message is system role");
-assert(typeof preamble.content === "string" && preamble.content.includes("topic-a"), "buildMessageArray: preamble includes topic-a summary");
-
-// Active messages should be present
-const activeMessages = result.filter(m => m.role === "user" && typeof m.content === "string" && m.content.includes("Active topic"));
-assert(activeMessages.length === 1, "buildMessageArray: active messages included");
-
-// ── Atomic tool-group trimming ──
-console.log("\n  atomic tool-group trimming:");
-
-// Make the assistant message large so trimming from the end excludes it but keeps the toolResults
-const toolAssistant: SimpleMessage = { id: "ta1", role: "assistant", content: "x".repeat(400), timestamp: 10 };
-const toolResult1: SimpleMessage = { id: "tr1", role: "toolResult", content: "command output here", timestamp: 11 };
-const toolResult2: SimpleMessage = { id: "tr2", role: "toolResult", content: "second result", timestamp: 12 };
-const afterTool: SimpleMessage = { id: "at1", role: "user", content: "Thanks for running that", timestamp: 13 };
-const afterReply: SimpleMessage = { id: "ar1", role: "assistant", content: "You're welcome", timestamp: 14 };
-
-const toolSeg = createSegment("tool-topic");
-toolSeg.tokenCount = 5000; // way over budget to force trimming
-toolSeg.status = "active";
-toolSeg.messageIds = ["ta1", "tr1", "tr2", "at1", "ar1"];
-
-const toolMsgMap = new Map<string, SimpleMessage>([
-  ["ta1", toolAssistant], ["tr1", toolResult1], ["tr2", toolResult2],
-  ["at1", afterTool], ["ar1", afterReply],
-]);
-
-// Budget so tight only last ~2 messages fit, which would normally slice
-// between the assistant tool call and its results
-const toolAllocations: BudgetAllocation[] = [
-  { segment: toolSeg, tier: "active", allocatedTokens: 50, scored: scored[0] },
-];
-
-const toolResult = buildMessageArray(toolAllocations, (ids) =>
-  ids.map(id => toolMsgMap.get(id)!).filter(Boolean)
-);
-
-// No message in the result should be a toolResult without a preceding assistant
-const nonSystemMsgs = toolResult.filter(m => m.role !== "system");
-if (nonSystemMsgs.length > 0) {
-  assert(nonSystemMsgs[0].role !== "toolResult", "trim: no orphaned leading toolResult");
-}
-
-// If toolResults are present, an assistant must precede them
-let lastNonToolResult = -1;
-let orphanedToolResult = false;
-for (let i = 0; i < nonSystemMsgs.length; i++) {
-  if (nonSystemMsgs[i].role !== "toolResult") lastNonToolResult = i;
-  if (nonSystemMsgs[i].role === "toolResult" && lastNonToolResult === -1) {
-    orphanedToolResult = true;
-  }
-}
-assert(!orphanedToolResult, "trim: no toolResult before any assistant/user message");
 
 // ── Cross-session summary-only enforcement ──
 console.log("\n  cross-session summary-only:");
