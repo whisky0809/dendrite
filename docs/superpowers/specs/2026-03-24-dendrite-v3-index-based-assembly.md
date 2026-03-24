@@ -40,9 +40,9 @@ OpenClaw gets its own objects back. Tool grouping, content block structure, and 
 
 ### What changes
 
-#### 1. Segmenter tracks original indices
+#### 1. Reconciliation: mapping segment messages to params.messages indices
 
-`addMessage()` gains a `originalIndex` parameter — the position of this message in `params.messages` as seen by the most recent `assemble()` call.
+The segmenter ingests messages one at a time (via `ingest()`), but the original `params.messages` array is only available during `assemble()`. The reconciliation step maps each SimpleMessage in the segmenter to its position in `params.messages`.
 
 ```typescript
 interface SimpleMessage {
@@ -50,28 +50,51 @@ interface SimpleMessage {
   role: "user" | "assistant" | "toolResult";
   content: string;
   timestamp: number;
-  originalIndex?: number;  // position in params.messages
+  originalIndex?: number;  // position in params.messages, set during assemble()
 }
 ```
 
-The index is set during `assemble()`, not during `ingest()`. At ingest time, we don't have `params.messages` yet. Instead, assemble() does a one-time reconciliation: it walks `params.messages`, matches each to a known SimpleMessage by ID, and records the index.
+**Why not use message IDs?** OpenClaw's `AgentMessage` types (`UserMessage`, `AssistantMessage`, `ToolResultMessage`) do not have an `id` field. The current `toSimpleMessage` generates synthetic IDs from `msg_${index}_${timestamp}`, where `index` is the ingest-time counter. These synthetic IDs are not stable across ingest and assemble — OpenClaw may filter, reorder, or inject messages between calls.
+
+**Reconciliation strategy: timestamp + role matching.** At the start of each `assemble()` call, walk `params.messages` and match to SimpleMessages by `(timestamp, role)`:
 
 ```typescript
 // In assemble(), before scoring:
-const indexByMsgId = new Map<string, number>();
+// Build a lookup: (timestamp, role) → list of params.messages indices
+const lookup = new Map<string, number[]>();
 for (let i = 0; i < params.messages.length; i++) {
-  const id = params.messages[i].id;
-  if (id) indexByMsgId.set(id, i);
+  const msg = params.messages[i];
+  const key = `${msg.timestamp}:${msg.role}`;
+  const arr = lookup.get(key);
+  if (arr) arr.push(i);
+  else lookup.set(key, [i]);
 }
-for (const seg of segments) {
+
+// Track which params.messages indices are covered by segments
+const trackedOriginalIndices = new Set<number>();
+
+// Match each segment's messages to params.messages positions
+for (const seg of currentSegments) {
   for (const msgId of seg.messageIds) {
-    const msg = state.segmenter.getMessage(msgId);
-    if (msg) msg.originalIndex = indexByMsgId.get(msgId);
+    const simple = state.segmenter.getMessage(msgId);
+    if (!simple) continue;
+    const key = `${simple.timestamp}:${simple.role}`;
+    const candidates = lookup.get(key);
+    if (candidates && candidates.length > 0) {
+      // Consume the first match (handles multiple messages at same timestamp)
+      simple.originalIndex = candidates.shift()!;
+      trackedOriginalIndices.add(simple.originalIndex);
+      if (candidates.length === 0) lookup.delete(key);
+    } else {
+      simple.originalIndex = undefined; // not found in params.messages
+    }
   }
 }
 ```
 
-**Message ID stability:** OpenClaw assigns IDs to AgentMessages. The `toSimpleMessage` conversion already captures `msg.id`. If a message lacks an ID, the fallback `msg_${index}_${timestamp}` ID is used — these won't match in the index lookup, but that's handled by the fallback path (see below).
+This is similar to v2's lookup but with a critical difference: **we consume matches and use the result as indices, not as objects to reconstruct**. The timestamp+role match is imperfect (multiple messages can share a timestamp), but consuming matches in order handles this — messages within a segment are ordered chronologically, matching the order in `params.messages`.
+
+**When reconciliation fails:** If a SimpleMessage has no match (OpenClaw dropped it, or it was added during a session that no longer exists), its `originalIndex` stays `undefined` and it is excluded from the selection. The segment's token count may be slightly overstated, but this is benign — budget allocation uses the segment's pre-computed `tokenCount`, and the actual output will be slightly under budget.
 
 #### 2. Assembler returns indices, not messages
 
@@ -138,7 +161,7 @@ Cross-session segments (from the SegmentPool) don't have entries in `params.mess
 
 This is the correct abstraction. Messages from a different session have broken tool pairings, missing context, and confusing role sequences. A summary like `[Prior context — Docker networking: Configured bridge network for container-to-container communication, resolved DNS resolution issue by switching to custom network]` gives the model everything it needs to pick up the thread. The full messages add risk for minimal value.
 
-The `allocateBudgets()` function already handles this — cross-session segments with `sessionId` set are allocated to summary or excluded tiers. The change is to enforce this as a hard constraint rather than a budget-driven outcome.
+The `allocateBudgets()` function already handles this — cross-session segments with `sessionId` set are allocated to summary or excluded tiers. The change is to enforce this as a hard constraint rather than a budget-driven outcome. Note: `options` parameter to `allocateBudgets()` becomes required (it is already always passed by the plugin).
 
 ```typescript
 // In allocateBudgets(): cross-session segments are capped at summary tier
@@ -173,20 +196,34 @@ function selectPartialIndices(
   let i = indices.length - 1;
 
   while (i >= 0) {
-    // Collect a group: if this is a toolResult, gather all consecutive
-    // toolResults and their parent assistant
     const group: number[] = [];
-    while (i >= 0 && messages[indices[i]]?.role === "toolResult") {
-      group.unshift(indices[i]);
-      i--;
-    }
-    // Include the parent assistant (or standalone user/assistant)
-    if (i >= 0) {
-      group.unshift(indices[i]);
+    const role = messages[indices[i]]?.role;
+
+    if (role === "toolResult") {
+      // Collect all consecutive toolResults
+      while (i >= 0 && messages[indices[i]]?.role === "toolResult") {
+        group.unshift(indices[i]);
+        i--;
+      }
+      // The parent assistant must be the next message back.
+      // If it's not an assistant (segment boundary split the group),
+      // drop the orphaned toolResults — they can't stand alone.
+      if (i >= 0 && messages[indices[i]]?.role === "assistant") {
+        group.unshift(indices[i]);
+        i--;
+      } else {
+        // Orphaned toolResults at segment boundary — skip them
+        continue;
+      }
+    } else {
+      // Standalone user or assistant message
+      group.push(indices[i]);
       i--;
     }
 
-    const groupTokens = group.reduce((sum, idx) => sum + estimateTokensFn(messages[idx]), 0);
+    const groupTokens = group.reduce(
+      (sum, idx) => sum + estimateTokensFn(messages[idx]), 0
+    );
     if (tokens + groupTokens > tokenBudget) break;
 
     selected.unshift(...group);
@@ -207,22 +244,56 @@ If `params.messages` contains messages not tracked by any segment (e.g., system 
 
 ### Untracked messages
 
-Not all messages in `params.messages` will be tracked by segments. System messages, messages added after the last ingest, or messages the segmenter filtered out (null from `toSimpleMessage`) need to be handled.
+Not all messages in `params.messages` will be tracked by segments. These fall into categories:
 
-**Strategy:** After computing the selection plan, the plugin includes untracked messages at their original positions. This preserves any system prompts or metadata messages that OpenClaw injected.
+- **System messages** — OpenClaw injects system prompts, metadata. Role is `system`, which `toSimpleMessage` filters out. Must be preserved.
+- **Messages after the last ingest** — if assemble() is called before the latest message is ingested (race-free by contract, but possible on bootstrap). Must be preserved.
+- **Messages the segmenter filtered** — tool-call-only assistants with no text content get placeholder SimpleMessages, so these are typically tracked. But if `toSimpleMessage` returned null (unknown role), the message is untracked. Must be preserved — they are valid AgentMessages that OpenClaw expects to see.
+
+**Strategy:** All untracked messages are included. The reconciliation step (Section 1) builds `trackedOriginalIndices` — the set of `params.messages` positions claimed by segments. Everything not in that set is untracked and included at its original position.
 
 ```typescript
 // After building selection from segments:
 const selectedSet = new Set(plan.indices);
 const untracked: number[] = [];
 for (let i = 0; i < params.messages.length; i++) {
-  if (!trackedIndices.has(i) && !selectedSet.has(i)) {
-    // Message not tracked by any segment — include by default
+  if (!trackedOriginalIndices.has(i) && !selectedSet.has(i)) {
     untracked.push(i);
   }
 }
+// Merge and sort to maintain original ordering
 const allIndices = [...plan.indices, ...untracked].sort((a, b) => a - b);
 ```
+
+This is intentionally permissive. The assembler's job is to *exclude* low-relevance tracked messages, not to filter untracked ones. If an untracked message shouldn't be in context, that's OpenClaw's responsibility — Dendrite passes it through.
+
+### Turn snapshots
+
+The current `assemble()` builds `TurnSnapshotMessage[]` from the assembled `SimpleMessage` array for CLI peek inspection. With index-based assembly, snapshots are built from `params.messages` at the selected indices, using `extractTextContent()` to get preview text:
+
+```typescript
+const snapshotMessages: TurnSnapshotMessage[] = [];
+for (const idx of allIndices) {
+  const msg = params.messages[idx];
+  if (msg.role === "system") continue;
+  const text = extractTextContent(msg);
+  // Find which segment this index belongs to
+  const segId = indexToSegmentId.get(idx) ?? null;
+  snapshotMessages.push({
+    role: msg.role as "user" | "assistant" | "toolResult",
+    segmentId: segId,
+    tokenCount: estimateTokens(text),
+    contentPreview: text.slice(0, 200),
+    contentFull: text,
+  });
+}
+```
+
+The `indexToSegmentId` map is built during reconciliation — each tracked `originalIndex` maps to its segment's ID. Untracked messages get `segmentId: null`.
+
+### dispose() lifecycle
+
+`dispose()` remains a no-op. This change introduces no new resources that need cleanup.
 
 ## Error Handling
 
@@ -258,7 +329,7 @@ const allIndices = [...plan.indices, ...untracked].sort((a, b) => a - b);
 - Orphaned toolResult dropping (~16 lines)
 - `buildMessageArray()` function (~95 lines)
 
-**Net code change:** ~170 lines removed, ~80 lines added. The assembly path becomes significantly simpler.
+**Net code change:** ~170 lines removed, ~130 lines added (reconciliation, selection plan, snapshot builder, partial group logic). Net reduction of ~40 lines, with significantly reduced complexity in the critical assembly path.
 
 ## Testing
 
