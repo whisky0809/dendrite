@@ -11,8 +11,8 @@
 
 import { SegmentPool } from "./segment-pool.js";
 import { scoreSegments } from "./scorer.js";
-import { allocateBudgets, buildMessageArray } from "./assembler.js";
-import { createSegment, estimateTokens, type SimpleMessage } from "./types.js";
+import { allocateBudgets, buildSelectionPlan } from "./assembler.js";
+import { createSegment, estimateTokens, extractTextContent, type SimpleMessage } from "./types.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -148,41 +148,43 @@ const crossTokens = budgets
   .reduce((sum, b) => sum + b.allocatedTokens, 0);
 assert(crossTokens <= 5000 * 0.3, `cross-session tokens (${crossTokens}) within 30% cap`);
 
-// ── Message assembly with lazy loading ──
-console.log("\n  Message assembly with lazy loading:");
+// ── Message assembly with index-based selection ──
+console.log("\n  Index-based assembly:");
 
-// Create current session message store
-const currentMessages = new Map<string, SimpleMessage>();
-currentMessages.set("c_msg_0", { id: "c_msg_0", role: "user", content: "Set up the project", timestamp: Date.now() - 5000 });
-currentMessages.set("c_msg_1", { id: "c_msg_1", role: "user", content: "How do I use Docker compose with this?", timestamp: Date.now() });
+// Create mock params.messages for current session
+const paramsMessages: any[] = [
+  { role: "user", content: [{ type: "text", text: "Set up the project" }], timestamp: Date.now() - 5000 },
+  { role: "user", content: [{ type: "text", text: "How do I use Docker compose with this?" }], timestamp: Date.now() },
+];
 
-const assembled = buildMessageArray(budgets, (ids, segment) => {
-  if (segment.sessionId && segment.transcriptPath) {
-    return pool.loadMessages(segment.transcriptPath, ids);
-  }
-  return ids.map(id => currentMessages.get(id)).filter((m): m is SimpleMessage => m !== undefined);
-});
+// Map current-session message IDs to params.messages indices
+const idToIndex = new Map<string, number>([["c_msg_0", 0], ["c_msg_1", 1]]);
 
-assert(assembled.length > 0, "assembled array is not empty");
-// Active segment messages should always be present
-const activeContent = assembled.filter(m => m.content.includes("Docker compose"));
-assert(activeContent.length > 0, "active segment messages present in assembly");
+const estimateAgentTokens = (msg: any) => estimateTokens(extractTextContent(msg));
+const plan = buildSelectionPlan(budgets, (segment) => {
+  return segment.messageIds
+    .map(id => idToIndex.get(id))
+    .filter((i): i is number => i !== undefined);
+}, paramsMessages, estimateAgentTokens);
 
-// If Docker segment got full or partial tier, its messages should be lazy-loaded
+// Active segment messages should be in indices
+assert(plan.indices.includes(1), "active segment message in selection");
+
+// Cross-session segments should be summary-only (never full/partial)
 const dockerBudget = budgets.find(b => b.segment.id === "seg_docker")!;
-if (dockerBudget.tier === "full" || dockerBudget.tier === "partial") {
-  const dockerContent = assembled.filter(m => m.content.includes("Docker bridge") || m.content.includes("docker0"));
-  assert(dockerContent.length > 0, "Docker past-session messages lazy-loaded into assembly");
-}
+const pythonBudget = budgets.find(b => b.segment.id === "seg_python")!;
+assert(dockerBudget.tier === "summary" || dockerBudget.tier === "excluded",
+  `Docker cross-session is summary/excluded (got ${dockerBudget.tier})`);
+assert(pythonBudget.tier === "summary" || pythonBudget.tier === "excluded",
+  `Python cross-session is summary/excluded (got ${pythonBudget.tier})`);
 
-// If Docker segment got summary tier, its summary should be in the preamble
+// Cross-session summaries should be in summaryBlocks
 if (dockerBudget.tier === "summary") {
-  const preamble = assembled.find(m => m.role === "system");
-  assert(preamble !== undefined && preamble.content.includes("Docker"), "Docker summary in preamble");
+  assert(plan.summaryBlocks.some(b => b.includes("Docker")), "Docker summary in summaryBlocks");
 }
 
 console.log(`\n  Docker segment tier: ${dockerBudget.tier}`);
-console.log(`  Python segment tier: ${budgets.find(b => b.segment.id === "seg_python")!.tier}`);
+console.log(`  Python segment tier: ${pythonBudget.tier}`);
 
 // Cleanup
 fs.rmSync(tmpDir, { recursive: true });

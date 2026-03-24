@@ -7,8 +7,8 @@
 
 import { Segmenter } from "./segmenter.js";
 import { scoreSegments } from "./scorer.js";
-import { allocateBudgets, buildMessageArray } from "./assembler.js";
-import { estimateTokens, type SimpleMessage } from "./types.js";
+import { allocateBudgets, buildSelectionPlan } from "./assembler.js";
+import { estimateTokens, extractTextContent, type SimpleMessage } from "./types.js";
 
 let passed = 0;
 let failed = 0;
@@ -84,6 +84,25 @@ segmenter.segments[1].summaryTokens = estimateTokens(segmenter.segments[1].summa
 
 segmenter.segments[2].embedding = [0, 0, 1]; // K8s
 
+// Build mock params.messages (AgentMessage-like) from the SimpleMessages
+const allSimples = [...restMessages, { id: "d0", role: "user" as const, content: "Wait, how does our Docker container networking work?", timestamp: now - 3240000 }, ...dockerMessages, { id: "k0", role: "user" as const, content: "What about Kubernetes deployment strategy?", timestamp: now - 600000 }, ...k8sMessages];
+const paramsMessages: any[] = allSimples.map(s => ({
+  role: s.role,
+  content: [{ type: "text", text: s.content }],
+  timestamp: s.timestamp,
+}));
+
+// Set originalIndex on all SimpleMessages in the segmenter
+for (const seg of segmenter.segments) {
+  for (const msgId of seg.messageIds) {
+    const simple = segmenter.getMessage(msgId);
+    if (simple) {
+      const idx = paramsMessages.findIndex(m => m.timestamp === simple.timestamp && m.role === simple.role);
+      simple.originalIndex = idx >= 0 ? idx : undefined;
+    }
+  }
+}
+
 console.log("\n  Assembly with large budget:");
 
 // Score with K8s-like query (active topic)
@@ -99,8 +118,11 @@ const largeBudget = allocateBudgets(scored, 50000, 2000, defaultAllocOpts);
 const fullCount = largeBudget.filter(b => b.tier === "full" || b.tier === "active").length;
 assert(fullCount === 3, "large budget: all segments fully expanded");
 
-const largeResult = buildMessageArray(largeBudget, (ids, _segment) => segmenter.getMessages(ids));
-assert(largeResult.length >= 12, "large budget: all messages present");
+const estimateAgentTokens = (msg: any) => estimateTokens(extractTextContent(msg));
+const largePlan = buildSelectionPlan(largeBudget, (seg) => {
+  return seg.messageIds.map(id => segmenter.getMessage(id)?.originalIndex).filter((i): i is number => i !== undefined);
+}, paramsMessages, estimateAgentTokens);
+assert(largePlan.indices.length >= 12, "large budget: all messages present");
 
 console.log("\n  Assembly with tight budget:");
 
@@ -111,9 +133,11 @@ const summarized = tightBudget.filter(b => b.tier === "summary").length;
 assert(excluded + summarized > 0, "tight budget: some segments compressed or excluded");
 assert(tightBudget[0].tier === "active", "tight budget: active always present");
 
-const tightResult = buildMessageArray(tightBudget, (ids, _segment) => segmenter.getMessages(ids));
-assert(tightResult.length < largeResult.length, "tight budget: fewer messages than large");
-assert(tightResult.some(m => m.role === "system"), "tight budget: has system preamble with summaries");
+const tightPlan = buildSelectionPlan(tightBudget, (seg) => {
+  return seg.messageIds.map(id => segmenter.getMessage(id)?.originalIndex).filter((i): i is number => i !== undefined);
+}, paramsMessages, estimateAgentTokens);
+assert(tightPlan.indices.length < largePlan.indices.length, "tight budget: fewer messages than large");
+assert(tightPlan.summaryBlocks.length > 0, "tight budget: has summary blocks");
 
 console.log("\n  Topic return simulation:");
 
