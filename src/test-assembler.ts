@@ -1,4 +1,4 @@
-import { allocateBudgets, buildMessageArray, type BudgetAllocation } from "./assembler.js";
+import { allocateBudgets, buildMessageArray, selectPartialIndices, type BudgetAllocation } from "./assembler.js";
 import { createSegment, type SimpleMessage } from "./types.js";
 import type { ScoredSegment } from "./scorer.js";
 
@@ -225,6 +225,57 @@ for (let i = 0; i < nonSystemMsgs.length; i++) {
   }
 }
 assert(!orphanedToolResult, "trim: no toolResult before any assistant/user message");
+
+// ── selectPartialIndices ──
+console.log("\n  selectPartialIndices:");
+
+// Helper: mock params.messages array
+const mockMessages: any[] = [
+  { role: "user", content: [{ type: "text", text: "hello" }], timestamp: 1 },         // idx 0
+  { role: "assistant", content: [{ type: "text", text: "hi" }], timestamp: 2 },        // idx 1
+  { role: "user", content: [{ type: "text", text: "run ls" }], timestamp: 3 },         // idx 2
+  {                                                                                     // idx 3
+    role: "assistant",
+    content: [{ type: "toolCall", id: "tc1", name: "exec", arguments: "{}" }],
+    timestamp: 4,
+  },
+  { role: "toolResult", toolCallId: "tc1", content: [{ type: "text", text: "f1" }], timestamp: 5 },  // idx 4
+  { role: "toolResult", toolCallId: "tc2", content: [{ type: "text", text: "f2" }], timestamp: 6 },  // idx 5
+  { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 7 },      // idx 6
+  { role: "user", content: [{ type: "text", text: "thanks" }], timestamp: 8 },         // idx 7
+];
+
+const tokenEst = (msg: any) => {
+  if (typeof msg.content === "string") return Math.ceil(msg.content.length / 4);
+  if (Array.isArray(msg.content)) return msg.content.reduce((s: number, b: any) =>
+    s + Math.ceil((b.text || b.name || "").length / 4), 0);
+  return 10;
+};
+
+// Test: large budget includes everything
+const allIndices = [0, 1, 2, 3, 4, 5, 6, 7];
+const selAll = selectPartialIndices(allIndices, mockMessages, 99999, tokenEst);
+assert(selAll.length === 8, "partial: large budget includes all");
+
+// Test: tight budget takes most recent complete groups
+const selTight = selectPartialIndices(allIndices, mockMessages, 20, tokenEst);
+assert(selTight.length > 0, "partial: tight budget includes something");
+// Should not start with toolResult (no orphaned results)
+assert(mockMessages[selTight[0]]?.role !== "toolResult", "partial: no leading toolResult");
+
+// Test: tool group is atomic — assistant + toolResults stay together
+const toolGroupIndices = [3, 4, 5]; // assistant(toolCall) + 2 toolResults
+const selGroup = selectPartialIndices(toolGroupIndices, mockMessages, 99999, tokenEst);
+assert(selGroup.includes(3) && selGroup.includes(4) && selGroup.includes(5),
+  "partial: tool group included atomically");
+
+// Test: orphaned toolResults at segment boundary are skipped
+const orphanIndices = [4, 5, 6, 7]; // starts with toolResults (assistant is in prior segment)
+const selOrphan = selectPartialIndices(orphanIndices, mockMessages, 99999, tokenEst);
+assert(!selOrphan.includes(4) && !selOrphan.includes(5),
+  "partial: orphaned toolResults skipped");
+assert(selOrphan.includes(6) && selOrphan.includes(7),
+  "partial: non-orphaned messages kept");
 
 console.log(`\n${"=".repeat(40)}`);
 console.log(`Results: ${passed} passed, ${failed} failed`);

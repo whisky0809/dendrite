@@ -134,6 +134,57 @@ export function allocateBudgets(
 }
 
 /**
+ * Select indices for partial-tier segments, preserving tool groups.
+ * Walks backward from the end, including complete groups that fit the budget.
+ * A tool group = one assistant message + all immediately following toolResult messages.
+ * Orphaned toolResults (no parent assistant in this segment) are skipped.
+ */
+export function selectPartialIndices(
+  indices: number[],
+  messages: any[],
+  tokenBudget: number,
+  estimateTokensFn: (msg: any) => number
+): number[] {
+  const selected: number[] = [];
+  let tokens = 0;
+  let i = indices.length - 1;
+
+  while (i >= 0) {
+    const group: number[] = [];
+    const role = messages[indices[i]]?.role;
+
+    if (role === "toolResult") {
+      // Collect all consecutive toolResults
+      while (i >= 0 && messages[indices[i]]?.role === "toolResult") {
+        group.unshift(indices[i]);
+        i--;
+      }
+      // Parent assistant must be next. If not, these are orphaned — skip.
+      if (i >= 0 && messages[indices[i]]?.role === "assistant") {
+        group.unshift(indices[i]);
+        i--;
+      } else {
+        continue; // skip orphaned toolResults
+      }
+    } else {
+      // Standalone user or assistant
+      group.push(indices[i]);
+      i--;
+    }
+
+    const groupTokens = group.reduce(
+      (sum, idx) => sum + estimateTokensFn(messages[idx]), 0
+    );
+    if (tokens + groupTokens > tokenBudget) break;
+
+    selected.unshift(...group);
+    tokens += groupTokens;
+  }
+
+  return selected;
+}
+
+/**
  * Lightweight message type returned by the assembler.
  * Converted to AgentMessage by the plugin layer.
  */
