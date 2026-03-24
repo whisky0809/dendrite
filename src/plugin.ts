@@ -8,7 +8,7 @@
 import { Segmenter, callDriftModel, buildDriftPrompt } from "./segmenter.js";
 import { scoreSegments, getEmbedding } from "./scorer.js";
 import { generateSummary } from "./summarizer.js";
-import { allocateBudgets, buildMessageArray } from "./assembler.js";
+import { allocateBudgets, buildSelectionPlan } from "./assembler.js";
 import {
   DEFAULT_CONFIG,
   estimateTokens,
@@ -43,20 +43,6 @@ function toSimpleMessage(msg: any, index: number): SimpleMessage | null {
     role,
     content,
     timestamp: msg.timestamp || Date.now(),
-  };
-}
-
-function toAgentMessage(msg: { role: string; content: string; timestamp: number }): any {
-  if (msg.role === "system") {
-    return null;
-  }
-  // toolResult without an original becomes a user message to avoid broken tool pairing
-  const safeRole = msg.role === "toolResult" ? "user" : msg.role;
-  const prefix = msg.role === "toolResult" ? "[Tool result] " : "";
-  return {
-    role: safeRole as "user" | "assistant",
-    content: [{ type: "text", text: prefix + msg.content }],
-    timestamp: msg.timestamp,
   };
 }
 
@@ -99,6 +85,56 @@ function getSession(sessionId: string, config: DendriteConfig): SessionState {
     sessions.set(sessionId, state);
   }
   return state;
+}
+
+/**
+ * Reconcile segment messages with params.messages indices.
+ * Uses (timestamp, role) matching with ordered consumption.
+ */
+function reconcileIndices(
+  segments: import("./types.js").Segment[],
+  segmenter: Segmenter,
+  paramsMessages: any[]
+): { trackedOriginalIndices: Set<number>; indexToSegmentId: Map<number, string> } {
+  // Build lookup: (timestamp:role) → list of params.messages indices
+  const lookup = new Map<string, number[]>();
+  for (let i = 0; i < paramsMessages.length; i++) {
+    const msg = paramsMessages[i];
+    const key = `${msg.timestamp}:${msg.role}`;
+    const arr = lookup.get(key);
+    if (arr) arr.push(i);
+    else lookup.set(key, [i]);
+  }
+
+  const trackedOriginalIndices = new Set<number>();
+  const indexToSegmentId = new Map<number, string>();
+
+  // Clear stale originalIndex values from previous assemble() calls
+  for (const seg of segments) {
+    for (const msgId of seg.messageIds) {
+      const simple = segmenter.getMessage(msgId);
+      if (simple) simple.originalIndex = undefined;
+    }
+  }
+
+  for (const seg of segments) {
+    for (const msgId of seg.messageIds) {
+      const simple = segmenter.getMessage(msgId);
+      if (!simple) continue;
+      const key = `${simple.timestamp}:${simple.role}`;
+      const candidates = lookup.get(key);
+      if (candidates && candidates.length > 0) {
+        simple.originalIndex = candidates.shift()!;
+        trackedOriginalIndices.add(simple.originalIndex);
+        indexToSegmentId.set(simple.originalIndex, seg.id);
+        if (candidates.length === 0) lookup.delete(key);
+      } else {
+        simple.originalIndex = undefined;
+      }
+    }
+  }
+
+  return { trackedOriginalIndices, indexToSegmentId };
 }
 
 // ── Plugin export ──
@@ -393,117 +429,49 @@ export default function dendrite(api: any) {
         .slice(0, pluginConfig.pinRecentSegments);
       const pinnedSegmentIds = currentClosed.map(s => s.id);
 
+      // ── Reconcile segment messages with params.messages indices ──
+      const { trackedOriginalIndices, indexToSegmentId } = reconcileIndices(
+        currentSegments, state.segmenter, params.messages
+      );
+
       const budgets = allocateBudgets(scored, tokenBudget - pluginConfig.reserveTokens, pluginConfig.reserveTokens, {
         currentSessionId: params.sessionId,
         pinRecentSegments: pluginConfig.pinRecentSegments,
         maxCrossSessionBudgetRatio: pluginConfig.maxCrossSessionBudgetRatio,
         pinnedSegmentIds,
       });
-      const assembled = buildMessageArray(budgets, (ids, segment) => {
-        if (segment.sessionId && segment.transcriptPath) {
-          return pool.loadMessages(segment.transcriptPath, ids);
-        }
-        return state.segmenter.getMessages(ids);
-      });
 
-      const systemPreamble = assembled.filter(m => m.role === "system").map(m => m.content).join("\n\n");
+      // ── Build selection plan ──
+      const estimateAgentTokens = (msg: any) => estimateTokens(extractTextContent(msg));
 
-      // Map assembled SimpleMessages back to original AgentMessages from params.messages.
-      // Use timestamp + role as the lookup key since messages don't have stable IDs.
-      const originalByTs = new Map<number, any[]>();
-      for (const msg of params.messages) {
-        if (typeof msg.timestamp !== "number") continue;
-        const arr = originalByTs.get(msg.timestamp);
-        if (arr) arr.push(msg);
-        else originalByTs.set(msg.timestamp, [msg]);
-      }
+      const plan = buildSelectionPlan(budgets, (segment) => {
+        return segment.messageIds
+          .map(id => state.segmenter.getMessage(id)?.originalIndex)
+          .filter((i): i is number => i !== undefined);
+      }, params.messages, estimateAgentTokens);
 
-      let lookupHits = 0, lookupMisses = 0;
-      const conversationMessages = assembled
-        .filter(m => m.role !== "system")
-        .map(m => {
-          const arr = originalByTs.get(m.timestamp);
-          if (arr) {
-            const idx = arr.findIndex(orig => orig.role === m.role);
-            if (idx >= 0) {
-              lookupHits++;
-              return arr.splice(idx, 1)[0];
-            }
-          }
-          lookupMisses++;
-          log("lookup miss", { role: m.role, ts: m.timestamp, content: m.content?.slice(0, 60) });
-          // Fallback for cross-session or unmatched messages: safe text-only conversion.
-          // toolResult becomes user role to avoid broken tool pairing.
-          return toAgentMessage(m);
-        })
-        .filter(Boolean);
+      // Include untracked messages (system prompts, metadata, etc.)
+      const selectedSet = new Set(plan.indices);
+      const untracked: number[] = [];
+      for (let i = 0; i < params.messages.length; i++) {
+        if (!trackedOriginalIndices.has(i) && !selectedSet.has(i)) {
+          untracked.push(i);
+        }
+      }
+      const allIndices = [...plan.indices, ...untracked].sort((a, b) => a - b);
+      const conversationMessages = allIndices.map(i => params.messages[i]);
 
-      // Repair tool pairing: OpenClaw's sanitization pipeline may drop messages
-      // that dendrite's segmenter already ingested, creating orphaned tool_calls
-      // or toolResults. Fix both directions to prevent API errors.
-      const outToolCallIds = new Set<string>();
-      const outToolResultIds = new Set<string>();
-      for (const msg of conversationMessages as any[]) {
-        if (msg.role === "assistant" && Array.isArray(msg.content)) {
-          for (const c of msg.content) {
-            if (c.type === "toolCall" && c.id) outToolCallIds.add(c.id);
-          }
-        }
-        if (msg.role === "toolResult" && msg.toolCallId) {
-          outToolResultIds.add(msg.toolCallId);
-        }
-      }
-      // Strip orphaned tool_calls from assistants
-      for (const msg of conversationMessages as any[]) {
-        if (msg.role === "assistant" && Array.isArray(msg.content)) {
-          const orphaned = msg.content.filter((c: any) =>
-            c.type === "toolCall" && c.id && !outToolResultIds.has(c.id));
-          if (orphaned.length > 0) {
-            debug("stripping orphaned tool_calls", { ids: orphaned.map((c: any) => c.id) });
-            msg.content = msg.content.filter((c: any) =>
-              !(c.type === "toolCall" && c.id && !outToolResultIds.has(c.id)));
-            // If nothing left, mark for removal
-            if (msg.content.length === 0) {
-              (msg as any)._drop = true;
-            }
-          }
-        }
-      }
-      // Remove assistants that became empty after stripping
-      for (let i = conversationMessages.length - 1; i >= 0; i--) {
-        if ((conversationMessages[i] as any)._drop) {
-          conversationMessages.splice(i, 1);
-        }
-      }
-      // Drop orphaned toolResults entirely (atomic tool groups:
-      // if the assistant with the matching tool_call is gone, drop the result too)
-      const finalToolCallIds = new Set<string>();
-      for (const msg of conversationMessages as any[]) {
-        if (msg.role === "assistant" && Array.isArray(msg.content)) {
-          for (const c of msg.content) {
-            if (c.type === "toolCall" && c.id) finalToolCallIds.add(c.id);
-          }
-        }
-      }
-      const beforeCount = conversationMessages.length;
-      for (let i = conversationMessages.length - 1; i >= 0; i--) {
-        const msg = conversationMessages[i] as any;
-        if (msg.role === "toolResult" && msg.toolCallId && !finalToolCallIds.has(msg.toolCallId)) {
-          debug("dropping orphaned toolResult", { toolCallId: msg.toolCallId });
-          conversationMessages.splice(i, 1);
-        }
-      }
-      if (conversationMessages.length < beforeCount) {
-        debug("atomic tool group cleanup", { dropped: beforeCount - conversationMessages.length });
-      }
-
-      log("assemble", {
-        segments: segments.length, assembled: assembled.length,
-        output: conversationMessages.length, hits: lookupHits, misses: lookupMisses,
-      });
-
+      const systemPreamble = plan.summaryBlocks.join("\n\n");
       const estimatedTokens = budgets.reduce((sum, b) => sum + b.allocatedTokens, 0);
 
+      log("assemble", {
+        segments: segments.length,
+        selected: plan.indices.length,
+        untracked: untracked.length,
+        output: conversationMessages.length,
+      });
+
+      // ── Observability ──
       const fallbacks: string[] = [];
       if (!state.embeddingsAvailable) fallbacks.push("embedding-unavailable:recency-only");
       if (summarizedThisTurn > 0) fallbacks.push(`summaries-generated:${summarizedThisTurn}`);
@@ -515,42 +483,27 @@ export default function dendrite(api: any) {
             dendrite: "assembly-log",
             contextWindow: tokenBudget,
             budgetUsed: estimatedTokens,
-            segments: budgets.map(b => ({
-              id: b.segment.id,
-              tier: b.tier,
-              tokens: b.allocatedTokens,
+            segments: plan.segmentPlans.map(sp => ({
+              id: sp.segmentId,
+              tier: sp.tier,
+              included: sp.includedCount,
+              total: sp.totalCount,
             })),
             fallbacks,
           });
-        } catch {
-          // Non-critical
-        }
+        } catch { /* non-critical */ }
       }
 
-      // Persist turn snapshot for CLI peek tool
+      // ── Turn snapshot ──
       try {
-        // Build segment-ID lookup: message timestamp -> segment ID
-        // We use timestamp because AssembledMessage carries timestamp but not id.
-        const tsToSegment = new Map<number, string>();
-        for (const b of budgets) {
-          const msgs = state.segmenter.getMessages(b.segment.messageIds);
-          for (const msg of msgs) {
-            tsToSegment.set(msg.timestamp, b.segment.id);
-          }
-        }
-
-        // assembled (non-system) and conversationMessages share indices by construction:
-        // conversationMessages = assembled.filter(non-system).map(lookup original)
-        const assembledNonSystem = assembled.filter(m => m.role !== "system");
         const snapshotMessages: import("./types.js").TurnSnapshotMessage[] = [];
-        for (let i = 0; i < conversationMessages.length; i++) {
-          const agentMsg = conversationMessages[i] as any;
-          const simpleMsg = assembledNonSystem[i];
-          const text = extractTextContent(agentMsg);
-          const role = (simpleMsg?.role ?? agentMsg.role) as "user" | "assistant" | "toolResult";
+        for (const idx of allIndices) {
+          const msg = params.messages[idx];
+          if (msg.role === "system") continue;
+          const text = extractTextContent(msg);
           snapshotMessages.push({
-            role,
-            segmentId: simpleMsg ? (tsToSegment.get(simpleMsg.timestamp) ?? null) : null,
+            role: msg.role as "user" | "assistant" | "toolResult",
+            segmentId: indexToSegmentId.get(idx) ?? null,
             tokenCount: estimateTokens(text),
             contentPreview: text.slice(0, 200),
             contentFull: text,
