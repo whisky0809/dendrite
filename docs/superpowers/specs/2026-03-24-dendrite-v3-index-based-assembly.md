@@ -92,7 +92,9 @@ for (const seg of currentSegments) {
 }
 ```
 
-This is similar to v2's lookup but with a critical difference: **we consume matches and use the result as indices, not as objects to reconstruct**. The timestamp+role match is imperfect (multiple messages can share a timestamp), but consuming matches in order handles this — messages within a segment are ordered chronologically, matching the order in `params.messages`.
+This is similar to v2's lookup but with a critical difference: **we consume matches and use the result as indices, not as objects to reconstruct**. The timestamp+role match is imperfect (multiple messages can share a timestamp), but consuming matches in order handles this — messages within a segment are ordered chronologically, matching the order in `params.messages`. This assumes OpenClaw preserves chronological message ordering in `params.messages`. If OpenClaw reorders messages with identical `(timestamp, role)` keys, index assignments may swap, but the correct set of messages will still be selected.
+
+**Ephemeral indices:** `originalIndex` is recomputed from scratch on every `assemble()` call. It must not be cached or relied upon across turns — `params.messages` may change between calls as new messages are appended or sanitization drops entries.
 
 **When reconciliation fails:** If a SimpleMessage has no match (OpenClaw dropped it, or it was added during a session that no longer exists), its `originalIndex` stays `undefined` and it is excluded from the selection. The segment's token count may be slightly overstated, but this is benign — budget allocation uses the segment's pre-computed `tokenCount`, and the actual output will be slightly under budget.
 
@@ -161,11 +163,11 @@ Cross-session segments (from the SegmentPool) don't have entries in `params.mess
 
 This is the correct abstraction. Messages from a different session have broken tool pairings, missing context, and confusing role sequences. A summary like `[Prior context — Docker networking: Configured bridge network for container-to-container communication, resolved DNS resolution issue by switching to custom network]` gives the model everything it needs to pick up the thread. The full messages add risk for minimal value.
 
-The `allocateBudgets()` function already handles this — cross-session segments with `sessionId` set are allocated to summary or excluded tiers. The change is to enforce this as a hard constraint rather than a budget-driven outcome. Note: `options` parameter to `allocateBudgets()` becomes required (it is already always passed by the plugin).
+The `allocateBudgets()` function already handles this — cross-session segments with `sessionId` set are allocated to summary or excluded tiers. The change is to enforce this as a hard constraint rather than a budget-driven outcome. Note: `options` parameter to `allocateBudgets()` becomes required (drop the `?` — it is already always passed by the plugin). Signature changes from `options?: AllocateOptions` to `options: AllocateOptions`.
 
 ```typescript
 // In allocateBudgets(): cross-session segments are capped at summary tier
-if (seg.sessionId !== undefined && seg.sessionId !== opts.currentSessionId) {
+if (seg.sessionId !== undefined) {
   // Can only be summary or excluded, never full/partial
   if (seg.summary && seg.summaryTokens <= effectiveRemaining) {
     allocations.push({ segment: seg, tier: "summary", ... });
