@@ -184,6 +184,101 @@ export function selectPartialIndices(
   return selected;
 }
 
+export interface SelectionPlan {
+  /** Ordered indices into params.messages to include (sorted ascending) */
+  indices: number[];
+  /** Summary text blocks for systemPromptAddition */
+  summaryBlocks: string[];
+  /** Per-segment metadata for logging */
+  segmentPlans: Array<{
+    segmentId: string;
+    tier: Tier;
+    includedCount: number;
+    totalCount: number;
+  }>;
+}
+
+/**
+ * Build a selection plan from budget allocations.
+ * Returns indices into params.messages (sorted ascending) and summary blocks.
+ */
+export function buildSelectionPlan(
+  allocations: BudgetAllocation[],
+  getOriginalIndices: (segment: Segment) => number[],
+  messages: any[],
+  estimateTokensFn: (msg: any) => number
+): SelectionPlan {
+  const indicesSet = new Set<number>();
+  const summaryBlocks: string[] = [];
+  const segmentPlans: SelectionPlan["segmentPlans"] = [];
+
+  for (const alloc of allocations) {
+    const seg = alloc.segment;
+    const allIndices = getOriginalIndices(seg);
+
+    switch (alloc.tier) {
+      case "active":
+      case "full": {
+        // Include all indices. For active, if over budget, take most recent.
+        if (alloc.tier === "active" && alloc.allocatedTokens < seg.tokenCount) {
+          const trimmed = selectPartialIndices(
+            allIndices, messages, alloc.allocatedTokens, estimateTokensFn
+          );
+          for (const idx of trimmed) indicesSet.add(idx);
+          segmentPlans.push({
+            segmentId: seg.id, tier: alloc.tier,
+            includedCount: trimmed.length, totalCount: allIndices.length,
+          });
+        } else {
+          for (const idx of allIndices) indicesSet.add(idx);
+          segmentPlans.push({
+            segmentId: seg.id, tier: alloc.tier,
+            includedCount: allIndices.length, totalCount: allIndices.length,
+          });
+        }
+        break;
+      }
+      case "partial": {
+        summaryBlocks.push(
+          `[Prior context — ${seg.topic}: ${seg.summary}]`
+        );
+        const recentBudget = alloc.allocatedTokens - (seg.summaryTokens || 0);
+        const partial = selectPartialIndices(
+          allIndices, messages, recentBudget, estimateTokensFn
+        );
+        for (const idx of partial) indicesSet.add(idx);
+        segmentPlans.push({
+          segmentId: seg.id, tier: "partial",
+          includedCount: partial.length, totalCount: allIndices.length,
+        });
+        break;
+      }
+      case "summary": {
+        const text = seg.summary
+          || `${seg.topic}: ~${seg.messageCount} messages`;
+        summaryBlocks.push(`[Prior context — ${seg.topic}: ${text}]`);
+        segmentPlans.push({
+          segmentId: seg.id, tier: "summary",
+          includedCount: 0, totalCount: allIndices.length,
+        });
+        break;
+      }
+      case "excluded": {
+        segmentPlans.push({
+          segmentId: seg.id, tier: "excluded",
+          includedCount: 0, totalCount: allIndices.length,
+        });
+        break;
+      }
+    }
+  }
+
+  // Sort indices ascending to preserve original message ordering
+  const indices = Array.from(indicesSet).sort((a, b) => a - b);
+
+  return { indices, summaryBlocks, segmentPlans };
+}
+
 /**
  * Lightweight message type returned by the assembler.
  * Converted to AgentMessage by the plugin layer.

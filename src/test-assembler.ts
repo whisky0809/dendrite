@@ -1,4 +1,4 @@
-import { allocateBudgets, buildMessageArray, selectPartialIndices, type BudgetAllocation } from "./assembler.js";
+import { allocateBudgets, buildMessageArray, selectPartialIndices, buildSelectionPlan, type BudgetAllocation } from "./assembler.js";
 import { createSegment, type SimpleMessage } from "./types.js";
 import type { ScoredSegment } from "./scorer.js";
 
@@ -225,6 +225,82 @@ for (let i = 0; i < nonSystemMsgs.length; i++) {
   }
 }
 assert(!orphanedToolResult, "trim: no toolResult before any assistant/user message");
+
+// ── buildSelectionPlan ──
+console.log("\n  buildSelectionPlan:");
+
+// Create segments with known indices
+const planActive = createSegment("plan-active");
+planActive.status = "active";
+planActive.tokenCount = 200;
+planActive.messageCount = 2;
+planActive.messageIds = ["pa1", "pa2"];
+
+const planFull = createSegment("plan-full");
+planFull.status = "closed";
+planFull.tokenCount = 100;
+planFull.messageCount = 2;
+planFull.messageIds = ["pf1", "pf2"];
+
+const planSummary = createSegment("plan-summary");
+planSummary.status = "closed";
+planSummary.tokenCount = 5000;
+planSummary.messageCount = 50;
+planSummary.messageIds = Array.from({ length: 50 }, (_, i) => `ps${i}`);
+planSummary.summary = "Summary of topic.";
+planSummary.summaryTokens = 10;
+
+const planExcluded = createSegment("plan-excluded");
+planExcluded.status = "closed";
+planExcluded.tokenCount = 5000;
+planExcluded.messageCount = 50;
+planExcluded.messageIds = Array.from({ length: 50 }, (_, i) => `pe${i}`);
+
+const planScored: ScoredSegment[] = [
+  { segment: planActive, score: 1.0, semanticScore: 1, recencyScoreValue: 1 },
+  { segment: planFull, score: 0.8, semanticScore: 0.9, recencyScoreValue: 0.5 },
+  { segment: planSummary, score: 0.3, semanticScore: 0.2, recencyScoreValue: 0.4 },
+  { segment: planExcluded, score: 0.05, semanticScore: 0.01, recencyScoreValue: 0.1 },
+];
+
+// Mock params.messages
+const planMessages: any[] = [
+  { role: "user", content: [{ type: "text", text: "full msg 1" }], timestamp: 1 },
+  { role: "assistant", content: [{ type: "text", text: "full msg 2" }], timestamp: 2 },
+  { role: "user", content: [{ type: "text", text: "active msg 1" }], timestamp: 3 },
+  { role: "assistant", content: [{ type: "text", text: "active msg 2" }], timestamp: 4 },
+];
+
+const planIndexMap = new Map<string, number>([
+  ["pf1", 0], ["pf2", 1], ["pa1", 2], ["pa2", 3],
+]);
+
+const planBudgets = allocateBudgets(planScored, 5000, 500);
+const plan = buildSelectionPlan(planBudgets, (segment) => {
+  return segment.messageIds
+    .map(id => planIndexMap.get(id))
+    .filter((i): i is number => i !== undefined);
+}, planMessages, (msg) => {
+  const text = Array.isArray(msg.content)
+    ? msg.content.map((b: any) => b.text || "").join("")
+    : String(msg.content || "");
+  return Math.ceil(text.length / 4);
+});
+
+assert(plan.indices.includes(2) && plan.indices.includes(3),
+  "plan: active segment indices present");
+assert(plan.indices.includes(0) && plan.indices.includes(1),
+  "plan: full segment indices present");
+assert(plan.summaryBlocks.length > 0, "plan: summary blocks present");
+assert(plan.summaryBlocks.some(b => b.includes("plan-summary")),
+  "plan: summary block references topic");
+
+for (let j = 1; j < plan.indices.length; j++) {
+  assert(plan.indices[j] > plan.indices[j - 1],
+    `plan: indices sorted (${plan.indices[j - 1]} < ${plan.indices[j]})`);
+}
+
+assert(plan.segmentPlans.length === 4, "plan: 4 segment plans");
 
 // ── selectPartialIndices ──
 console.log("\n  selectPartialIndices:");
