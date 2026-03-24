@@ -210,6 +210,11 @@ export class Segmenter {
       .filter((m): m is SimpleMessage => m !== undefined);
   }
 
+  /** Get a single message by ID. Returns undefined if not found. */
+  getMessage(id: string): SimpleMessage | undefined {
+    return this.messageStore.get(id);
+  }
+
   /** Load from a persisted SegmentIndex. */
   loadIndex(index: SegmentIndex, messages: SimpleMessage[]): void {
     this.segments = index.segments.map((s) => ({

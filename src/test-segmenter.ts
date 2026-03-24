@@ -123,6 +123,15 @@ assert(seg2.segments[0].status === "closed", "split: first segment closed");
 assert(seg2.activeSegment!.topic === "docker-networking", "split: new topic set");
 assert(seg2.activeSegment!.messageIds.includes("a3"), "split: new message moved to new segment");
 
+// ── getMessage ──
+console.log("\n  getMessage:");
+
+const getMsgSegmenter = new Segmenter({ minMessagesBeforeDrift: 3, maxSegmentMessages: 100, driftThreshold: 0.7 });
+const getMsgMsg: SimpleMessage = { id: "gm1", role: "user", content: "test", timestamp: 1 };
+getMsgSegmenter.addMessage(getMsgMsg);
+assert(getMsgSegmenter.getMessage("gm1")?.content === "test", "getMessage returns stored message");
+assert(getMsgSegmenter.getMessage("nonexistent") === undefined, "getMessage returns undefined for missing");
+
 console.log(`\n${"=".repeat(40)}`);
 console.log(`Results: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
