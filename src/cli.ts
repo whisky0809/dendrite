@@ -290,7 +290,9 @@ export async function rebuildSessions(opts: RebuildOptions): Promise<RebuildResu
           lastIndex = { segments: entry.segments };
           break;
         }
-      } catch { /* skip */ }
+      } catch (err) {
+        opts.logger.info(`Skipping line in transcript: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
     if (!lastIndex || lastIndex.segments.length === 0) {
@@ -323,7 +325,9 @@ export async function rebuildSessions(opts: RebuildOptions): Promise<RebuildResu
                     : "";
                 if (text) msgs.push({ id: msgId, role, content: text, timestamp: msg.timestamp || entry.timestamp || 0 });
               }
-            } catch { /* skip */ }
+              } catch (err) {
+                opts.logger.info(`Skipping message line in transcript: ${err instanceof Error ? err.message : String(err)}`);
+              }
           }
           if (msgs.length > 0) {
             // Retry with exponential backoff for rate limits
