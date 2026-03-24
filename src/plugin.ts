@@ -1,5 +1,5 @@
 /**
- * Dendrite v2 — OpenClaw Context Engine Plugin
+ * Dendrite v3 — OpenClaw Context Engine Plugin
  *
  * Entry point. Registers the context engine with OpenClaw's plugin API.
  * Types are imported as type-only; no runtime dependency on the SDK.

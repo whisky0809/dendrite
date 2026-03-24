@@ -83,53 +83,45 @@ export function allocateBudgets(
       continue;
     }
 
-    // Cross-session segments: summary-only (never full/partial)
+    // Cross-session segments: summary-only (never full/partial).
+    // Also enforced against the cross-session budget cap.
     if (isCrossSession) {
-      if (seg.summary && seg.summaryTokens <= remaining) {
+      const crossRemaining = crossSessionBudget - crossSessionUsed;
+      if (seg.summary && seg.summaryTokens <= remaining && seg.summaryTokens <= crossRemaining) {
         allocations.push({ segment: seg, tier: "summary", allocatedTokens: seg.summaryTokens, scored: entry });
         remaining -= seg.summaryTokens;
+        crossSessionUsed += seg.summaryTokens;
       } else {
         allocations.push({ segment: seg, tier: "excluded", allocatedTokens: 0, scored: entry });
       }
       continue;
     }
 
-    // For cross-session segments, check budget cap
-    const crossRemaining = isCrossSession ? crossSessionBudget - crossSessionUsed : Infinity;
-    const effectiveRemaining = Math.min(remaining, isCrossSession ? crossRemaining : Infinity);
-
-    if (effectiveRemaining <= 0) {
-      allocations.push({ segment: seg, tier: "excluded", allocatedTokens: 0, scored: entry });
-      continue;
-    }
+    // Current-session segments: try full → partial → summary → excluded
 
     // Try full expansion
-    if (seg.tokenCount <= effectiveRemaining) {
-      const tokens = seg.tokenCount;
-      allocations.push({ segment: seg, tier: "full", allocatedTokens: tokens, scored: entry });
-      remaining -= tokens;
-      if (isCrossSession) crossSessionUsed += tokens;
+    if (seg.tokenCount <= remaining) {
+      allocations.push({ segment: seg, tier: "full", allocatedTokens: seg.tokenCount, scored: entry });
+      remaining -= seg.tokenCount;
       continue;
     }
 
     // Try summary + partial
     const summaryTokens = seg.summary ? seg.summaryTokens : 0;
-    if (summaryTokens > 0 && summaryTokens < effectiveRemaining) {
-      const partialBudget = effectiveRemaining - summaryTokens;
+    if (summaryTokens > 0 && summaryTokens < remaining) {
+      const partialBudget = remaining - summaryTokens;
       if (partialBudget > 50) {
         const tokens = summaryTokens + partialBudget;
         allocations.push({ segment: seg, tier: "partial", allocatedTokens: tokens, scored: entry });
         remaining -= tokens;
-        if (isCrossSession) crossSessionUsed += tokens;
         continue;
       }
     }
 
     // Summary only
-    if (seg.summary && seg.summaryTokens <= effectiveRemaining) {
+    if (seg.summary && seg.summaryTokens <= remaining) {
       allocations.push({ segment: seg, tier: "summary", allocatedTokens: seg.summaryTokens, scored: entry });
       remaining -= seg.summaryTokens;
-      if (isCrossSession) crossSessionUsed += seg.summaryTokens;
       continue;
     }
 

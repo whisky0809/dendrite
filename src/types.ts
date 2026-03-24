@@ -1,5 +1,5 @@
 /**
- * Dendrite v2 types.
+ * Dendrite v3 types.
  *
  * We define our own lightweight message types for internal use.
  * The plugin.ts entry point handles conversion to/from AgentMessage.
