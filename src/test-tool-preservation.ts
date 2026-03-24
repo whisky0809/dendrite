@@ -1,5 +1,6 @@
-import { allocateBudgets, buildMessageArray } from "./assembler.js";
+import { allocateBudgets, buildSelectionPlan, selectPartialIndices } from "./assembler.js";
 import { createSegment, estimateTokens, extractTextContent, type SimpleMessage } from "./types.js";
+import { Segmenter } from "./segmenter.js";
 import type { ScoredSegment } from "./scorer.js";
 
 let passed = 0;
@@ -9,165 +10,182 @@ function assert(condition: boolean, name: string) {
   else { failed++; console.error(`  ✗ ${name}`); }
 }
 
-console.log("=== Tool Structure Preservation ===\n");
+const defaultOpts = { currentSessionId: undefined, pinRecentSegments: 0, maxCrossSessionBudgetRatio: 1.0, pinnedSegmentIds: [] as string[] };
 
-// ── Helpers matching plugin.ts logic ──
+console.log("=== Tool Structure Preservation (v3 index-based) ===\n");
 
-function buildOriginalLookup(messages: any[]): Map<string, any[]> {
-  const map = new Map<string, any[]>();
-  for (const msg of messages) {
-    const key = `${msg.role}:${msg.timestamp}`;
-    const arr = map.get(key);
-    if (arr) arr.push(msg);
-    else map.set(key, [msg]);
-  }
-  return map;
+// Helper to build mock AgentMessages
+function makeUser(text: string, ts: number): any {
+  return { role: "user", content: [{ type: "text", text }], timestamp: ts };
 }
-
-function lookupOriginal(map: Map<string, any[]>, role: string, timestamp: number): any | null {
-  const key = `${role}:${timestamp}`;
-  const arr = map.get(key);
-  if (!arr || arr.length === 0) return null;
-  return arr.shift()!;
+function makeAssistantText(text: string, ts: number): any {
+  return { role: "assistant", content: [{ type: "text", text }], timestamp: ts };
 }
-
-function toAgentMessageSafe(msg: { role: string; content: string; timestamp: number }): any {
-  if (msg.role === "system") return null;
-  const safeRole = msg.role === "toolResult" ? "user" : msg.role;
-  const prefix = msg.role === "toolResult" ? "[Tool result] " : "";
+function makeAssistantToolCall(calls: { id: string; name: string }[], ts: number): any {
   return {
-    role: safeRole,
-    content: [{ type: "text", text: prefix + msg.content }],
-    timestamp: msg.timestamp,
+    role: "assistant",
+    content: calls.map(c => ({ type: "toolCall", id: c.id, name: c.name, arguments: "{}" })),
+    timestamp: ts,
   };
 }
+function makeToolResult(toolCallId: string, text: string, ts: number): any {
+  return { role: "toolResult", toolCallId, toolName: "exec", content: [{ type: "text", text }], timestamp: ts };
+}
 
-// ── Test: originals preserved for current-session full/active tiers ──
-console.log("  original message lookup:");
+// ── Test 1: Full assembly preserves tool calls via reference equality ──
+console.log("  reference equality:");
+{
+  const paramsMessages = [
+    makeUser("Run ls", 100),
+    makeAssistantToolCall([{ id: "tc1", name: "exec" }], 101),
+    makeToolResult("tc1", "file1.txt\nfile2.txt", 102),
+    makeAssistantText("Here are the files.", 103),
+    makeUser("Thanks!", 104),
+  ];
 
-// Mock AgentMessages with tool structure
-const agentMessages: any[] = [
-  {
-    role: "user",
-    content: [{ type: "text", text: "Run ls for me" }],
-    timestamp: 100,
-  },
-  {
-    role: "assistant",
-    content: [
-      { type: "text", text: "Sure, running ls." },
-      { type: "toolCall", id: "exec:1", name: "exec", arguments: { command: "ls" } },
-    ],
-    stopReason: "toolUse",
-    model: "kimi-k2.5",
-    provider: "moonshot",
-    timestamp: 101,
-  },
-  {
-    role: "toolResult",
-    toolCallId: "exec:1",
-    toolName: "exec",
-    content: [{ type: "text", text: "file1.txt\nfile2.txt" }],
-    isError: false,
-    timestamp: 102,
-  },
-  {
-    role: "assistant",
-    content: [{ type: "text", text: "Here are your files: file1.txt, file2.txt" }],
-    timestamp: 103,
-  },
-  {
-    role: "user",
-    content: [{ type: "text", text: "Thanks!" }],
-    timestamp: 104,
-  },
-];
+  // Ingest into segmenter
+  const segmenter = new Segmenter({ minMessagesBeforeDrift: 999, maxSegmentMessages: 100, driftThreshold: 0.9 });
+  const simples: SimpleMessage[] = [];
+  for (let i = 0; i < paramsMessages.length; i++) {
+    const role = paramsMessages[i].role;
+    const text = extractTextContent(paramsMessages[i]) ||
+      (role === "assistant" ? "[Tool calls]" : "");
+    if (!text) continue;
+    const s: SimpleMessage = {
+      id: `msg_${i}`, role, content: text, timestamp: paramsMessages[i].timestamp,
+    };
+    simples.push(s);
+    segmenter.addMessage(s);
+  }
 
-// Build SimpleMessages (as dendrite's segmenter would)
-const simpleMessages: SimpleMessage[] = agentMessages
-  .filter(m => ["user", "assistant", "toolResult"].includes(m.role))
-  .map((m, i) => ({
-    id: `msg_${i}`,
-    role: m.role as "user" | "assistant" | "toolResult",
-    content: extractTextContent(m),
-    timestamp: m.timestamp,
-  }));
+  // Reconcile: set originalIndex
+  for (const s of simples) {
+    const idx = paramsMessages.findIndex(m => m.timestamp === s.timestamp && m.role === s.role);
+    s.originalIndex = idx >= 0 ? idx : undefined;
+  }
 
-// Create two segments to trigger the non-passthrough path
-const seg1 = createSegment("setup");
-seg1.status = "closed";
-seg1.messageIds = [simpleMessages[0].id];
-seg1.messageCount = 1;
-seg1.tokenCount = estimateTokens(simpleMessages[0].content);
-seg1.summary = "User asked to run ls";
-seg1.summaryTokens = 10;
+  const scored: ScoredSegment[] = [
+    { segment: segmenter.segments[0], score: 1.0, semanticScore: 1, recencyScoreValue: 1 },
+  ];
+  const budgets = allocateBudgets(scored, 100000, 16384, defaultOpts);
+  const plan = buildSelectionPlan(budgets, (seg) => {
+    return seg.messageIds
+      .map(id => segmenter.getMessage(id)?.originalIndex)
+      .filter((i): i is number => i !== undefined);
+  }, paramsMessages, (msg) => estimateTokens(extractTextContent(msg)));
 
-const seg2 = createSegment("tool-interaction");
-seg2.status = "active";
-seg2.messageIds = simpleMessages.slice(1).map(m => m.id);
-seg2.messageCount = 4;
-seg2.tokenCount = simpleMessages.slice(1).reduce((s, m) => s + estimateTokens(m.content), 0);
+  const output = plan.indices.map(i => paramsMessages[i]);
 
-const msgMap = new Map(simpleMessages.map(m => [m.id, m]));
+  // Reference equality — exact same objects
+  assert(output[0] === paramsMessages[0], "user message is same object");
+  assert(output[1] === paramsMessages[1], "toolCall assistant is same object");
+  assert(output[2] === paramsMessages[2], "toolResult is same object");
 
-const scored: ScoredSegment[] = [
-  { segment: seg2, score: 1.0, semanticScore: 1, recencyScoreValue: 1 },
-  { segment: seg1, score: 0.5, semanticScore: 0.3, recencyScoreValue: 0.2 },
-];
+  // Tool structure intact
+  assert(output[1].content[0].type === "toolCall", "toolCall content preserved");
+  assert(output[1].content[0].id === "tc1", "toolCall ID preserved");
+  assert(output[2].toolCallId === "tc1", "toolCallId preserved");
+}
 
-const budgets = allocateBudgets(scored, 10000, 2000, { currentSessionId: undefined, pinRecentSegments: 0, maxCrossSessionBudgetRatio: 1.0, pinnedSegmentIds: [] });
-const assembled = buildMessageArray(budgets, (ids) =>
-  ids.map(id => msgMap.get(id)!).filter(Boolean)
-);
+// ── Test 2: Multi-tool assistant with consecutive toolResults ──
+console.log("\n  multi-tool consecutive results:");
+{
+  const paramsMessages = [
+    makeUser("Run two commands", 200),
+    makeAssistantToolCall([{ id: "tc_a", name: "exec" }, { id: "tc_b", name: "read" }], 201),
+    makeToolResult("tc_a", "output A", 202),
+    makeToolResult("tc_b", "output B", 203),
+    makeAssistantText("Both done.", 204),
+  ];
 
-// Now simulate what fixed assemble() does: lookup originals
-const lookup = buildOriginalLookup(agentMessages);
-const conversationMessages = assembled
-  .filter(m => m.role !== "system")
-  .map(m => {
-    const original = lookupOriginal(lookup, m.role, m.timestamp);
-    return original || toAgentMessageSafe(m);
-  })
-  .filter(Boolean);
+  const segmenter = new Segmenter({ minMessagesBeforeDrift: 999, maxSegmentMessages: 100, driftThreshold: 0.9 });
+  for (let i = 0; i < paramsMessages.length; i++) {
+    const role = paramsMessages[i].role;
+    const text = extractTextContent(paramsMessages[i]) ||
+      (role === "assistant" ? "[Tool calls]" : "");
+    if (!text) continue;
+    const s: SimpleMessage = {
+      id: `msg_${i}`, role, content: text,
+      timestamp: paramsMessages[i].timestamp, originalIndex: i,
+    };
+    segmenter.addMessage(s);
+  }
 
-// The assistant with toolCall should preserve its structure
-const assistantWithTool = conversationMessages.find(
-  (m: any) => m.role === "assistant" && Array.isArray(m.content) &&
-    m.content.some((c: any) => c.type === "toolCall")
-);
-assert(assistantWithTool !== undefined, "assistant with toolCall preserved");
-assert(assistantWithTool?.content.some((c: any) => c.id === "exec:1"), "toolCall id preserved");
+  const scored: ScoredSegment[] = [
+    { segment: segmenter.segments[0], score: 1.0, semanticScore: 1, recencyScoreValue: 1 },
+  ];
+  const budgets = allocateBudgets(scored, 100000, 16384, defaultOpts);
+  const plan = buildSelectionPlan(budgets, (seg) => {
+    return seg.messageIds
+      .map(id => segmenter.getMessage(id)?.originalIndex)
+      .filter((i): i is number => i !== undefined);
+  }, paramsMessages, (msg) => estimateTokens(extractTextContent(msg)));
 
-// The toolResult should preserve toolCallId
-const toolResultMsg = conversationMessages.find((m: any) => m.role === "toolResult");
-assert(toolResultMsg !== undefined, "toolResult message preserved");
-assert(toolResultMsg?.toolCallId === "exec:1", "toolCallId preserved");
-assert(toolResultMsg?.toolName === "exec", "toolName preserved");
+  const output = plan.indices.map(i => paramsMessages[i]);
 
-// ── Test: cross-session fallback converts toolResult to user ──
-console.log("\n  cross-session fallback:");
+  assert(output.length === 5, "all 5 messages included");
+  // Check consecutive toolResults are present (the v2 bug)
+  assert(output[2].role === "toolResult" && output[2].toolCallId === "tc_a", "first toolResult present");
+  assert(output[3].role === "toolResult" && output[3].toolCallId === "tc_b", "second toolResult present");
+  // No role alternation violation because originals are returned as-is
+  assert(output[1].role === "assistant", "assistant before toolResults");
+  assert(output[4].role === "assistant", "assistant after toolResults");
+}
 
-// Simulate a cross-session message where no original exists
-const crossSessionToolResult = { role: "toolResult" as const, content: "some output", timestamp: 999 };
-const fallback = toAgentMessageSafe(crossSessionToolResult);
-assert(fallback.role === "user", "cross-session toolResult becomes user role");
-assert(fallback.content[0].text.startsWith("[Tool result]"), "cross-session toolResult has prefix");
+// ── Test 3: No orphan repair needed ──
+console.log("\n  no orphan repair needed:");
+{
+  // With index-based assembly, tool groups are never broken within a segment.
+  // This test verifies there's no toolResult without its assistant in output.
+  const paramsMessages = [
+    makeUser("hello", 300),
+    makeAssistantToolCall([{ id: "tc1", name: "read" }], 301),
+    makeToolResult("tc1", "data", 302),
+    makeAssistantText("Got it", 303),
+    makeUser("new topic", 304),
+    makeAssistantText("Sure", 305),
+  ];
 
-// ── Test: multiple toolResults at same timestamp consumed in order ──
-console.log("\n  timestamp collision handling:");
+  // Two segments with a drift split between msg 3 and 4
+  const seg1 = createSegment("topic-1");
+  seg1.status = "closed";
+  seg1.messageIds = ["m0", "m1", "m2", "m3"];
+  seg1.messageCount = 4;
+  seg1.tokenCount = 100;
+  seg1.summary = "First topic.";
+  seg1.summaryTokens = 10;
 
-const collisionMessages: any[] = [
-  { role: "toolResult", toolCallId: "r:1", toolName: "read", content: [{ type: "text", text: "first" }], timestamp: 200 },
-  { role: "toolResult", toolCallId: "r:2", toolName: "read", content: [{ type: "text", text: "second" }], timestamp: 200 },
-];
-const collisionLookup = buildOriginalLookup(collisionMessages);
-const first = lookupOriginal(collisionLookup, "toolResult", 200);
-const second = lookupOriginal(collisionLookup, "toolResult", 200);
-const third = lookupOriginal(collisionLookup, "toolResult", 200);
-assert(first?.toolCallId === "r:1", "first collision match is r:1");
-assert(second?.toolCallId === "r:2", "second collision match is r:2");
-assert(third === null, "third lookup returns null (exhausted)");
+  const seg2 = createSegment("topic-2");
+  seg2.status = "active";
+  seg2.messageIds = ["m4", "m5"];
+  seg2.messageCount = 2;
+  seg2.tokenCount = 50;
 
-console.log(`\n${"=".repeat(40)}`);
-console.log(`Results: ${passed} passed, ${failed} failed`);
+  const scored: ScoredSegment[] = [
+    { segment: seg2, score: 1.0, semanticScore: 1, recencyScoreValue: 1 },
+    { segment: seg1, score: 0.2, semanticScore: 0.1, recencyScoreValue: 0.3 },
+  ];
+
+  // Tight budget: only active segment fits, seg1 gets summary-only
+  const budgets = allocateBudgets(scored, 60, 50, defaultOpts);
+
+  // Map: seg1 messages have indices 0-3, seg2 has 4-5
+  const indexMap = new Map([["m0", 0], ["m1", 1], ["m2", 2], ["m3", 3], ["m4", 4], ["m5", 5]]);
+
+  const plan = buildSelectionPlan(budgets, (seg) => {
+    return seg.messageIds.map(id => indexMap.get(id)).filter((i): i is number => i !== undefined);
+  }, paramsMessages, (msg) => estimateTokens(extractTextContent(msg)));
+
+  const output = plan.indices.map(i => paramsMessages[i]);
+
+  // seg1 should be summary-only, so its messages (incl toolResult) should NOT be in output
+  assert(!output.some(m => m.timestamp === 302), "toolResult from summarized segment not in output");
+  // seg2 messages should be present
+  assert(output.some(m => m.timestamp === 304), "active segment user present");
+  assert(output.some(m => m.timestamp === 305), "active segment assistant present");
+  // Summary should be in summaryBlocks
+  assert(plan.summaryBlocks.length > 0, "summarized segment has summary block");
+}
+
+console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
