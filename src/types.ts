@@ -131,6 +131,8 @@ export interface SimpleMessage {
   role: "user" | "assistant" | "toolResult";
   content: string;
   timestamp: number;
+  /** Position in params.messages, set during assemble(). Ephemeral — recomputed every turn. */
+  originalIndex?: number;
 }
 
 /** Estimate tokens from a string using chars/4 heuristic. */
