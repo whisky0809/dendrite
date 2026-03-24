@@ -94,7 +94,8 @@ assert(scored[0].segment.status === "active", "active segment ranked first");
 assert(scored[0].segment.topic === "kubernetes-deployment", "active is K8s");
 
 // Large budget — everything fits
-const largeBudget = allocateBudgets(scored, 50000, 2000);
+const defaultAllocOpts = { currentSessionId: undefined, pinRecentSegments: 0, maxCrossSessionBudgetRatio: 1.0, pinnedSegmentIds: [] as string[] };
+const largeBudget = allocateBudgets(scored, 50000, 2000, defaultAllocOpts);
 const fullCount = largeBudget.filter(b => b.tier === "full" || b.tier === "active").length;
 assert(fullCount === 3, "large budget: all segments fully expanded");
 
@@ -104,7 +105,7 @@ assert(largeResult.length >= 12, "large budget: all messages present");
 console.log("\n  Assembly with tight budget:");
 
 // Tight budget — forces compression
-const tightBudget = allocateBudgets(scored, 100, 200);
+const tightBudget = allocateBudgets(scored, 100, 200, defaultAllocOpts);
 const excluded = tightBudget.filter(b => b.tier === "excluded").length;
 const summarized = tightBudget.filter(b => b.tier === "summary").length;
 assert(excluded + summarized > 0, "tight budget: some segments compressed or excluded");

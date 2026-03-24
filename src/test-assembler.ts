@@ -43,13 +43,14 @@ const scored: ScoredSegment[] = [
 ];
 
 // Plenty of budget — everything fits fully
-const budgetLarge = allocateBudgets(scored, 10000, 2000);
+const defaultAllocOpts = { currentSessionId: undefined, pinRecentSegments: 0, maxCrossSessionBudgetRatio: 1.0, pinnedSegmentIds: [] as string[] };
+const budgetLarge = allocateBudgets(scored, 10000, 2000, defaultAllocOpts);
 assert(budgetLarge[0].tier === "active", "large budget: active segment is active tier");
 assert(budgetLarge[1].tier === "full", "large budget: high-relevance gets full");
 assert(budgetLarge[2].tier === "full", "large budget: medium-relevance gets full (budget available)");
 
 // Tight budget — forces compression
-const budgetTight = allocateBudgets(scored, 1000, 500);
+const budgetTight = allocateBudgets(scored, 1000, 500, defaultAllocOpts);
 assert(budgetTight[0].tier === "active", "tight budget: active still active");
 const tiers = budgetTight.map(b => b.tier);
 assert(tiers.includes("summary") || tiers.includes("excluded"), "tight budget: some segments compressed");
@@ -57,7 +58,7 @@ assert(tiers.includes("summary") || tiers.includes("excluded"), "tight budget: s
 // Very tight — active segment gets reserveTokens as a guaranteed floor.
 // totalBudget=200, reserveTokens=300: active gets min(500, 200+300) = 500 (all tokens fit).
 // Since active.tokenCount(500) <= totalBudget+reserveTokens(500), allocatedTokens = 500.
-const budgetTiny = allocateBudgets(scored, 200, 300);
+const budgetTiny = allocateBudgets(scored, 200, 300, defaultAllocOpts);
 assert(budgetTiny[0].tier === "active", "tiny budget: active tier present");
 // Active should get more than totalBudget alone (200), thanks to reserveTokens floor
 assert(budgetTiny[0].allocatedTokens > 200, "tiny budget: active gets more than totalBudget alone (reserveTokens kicks in)");
@@ -226,6 +227,58 @@ for (let i = 0; i < nonSystemMsgs.length; i++) {
 }
 assert(!orphanedToolResult, "trim: no toolResult before any assistant/user message");
 
+// ── Cross-session summary-only enforcement ──
+console.log("\n  cross-session summary-only:");
+
+const crossForceSeg = createSegment("cross-force");
+crossForceSeg.status = "closed";
+crossForceSeg.tokenCount = 100; // small enough to fit as "full" normally
+crossForceSeg.messageCount = 3;
+crossForceSeg.messageIds = ["cf1", "cf2", "cf3"];
+crossForceSeg.sessionId = "past-session-id";
+crossForceSeg.summary = "Cross session summary.";
+crossForceSeg.summaryTokens = 10;
+
+const crossForceScored: ScoredSegment[] = [
+  { segment: activeSeg, score: 1.0, semanticScore: 1, recencyScoreValue: 1 },
+  { segment: crossForceSeg, score: 0.95, semanticScore: 0.99, recencyScoreValue: 0.9 },
+];
+
+// Even with huge budget, cross-session must not get full/partial
+const crossForceBudgets = allocateBudgets(crossForceScored, 100000, 500, {
+  currentSessionId: "current-session",
+  pinRecentSegments: 0,
+  maxCrossSessionBudgetRatio: 1.0,
+  pinnedSegmentIds: [],
+});
+
+const crossForceTier = crossForceBudgets.find(b => b.segment.id === crossForceSeg.id)!.tier;
+assert(crossForceTier === "summary", `cross-session forced to summary (got ${crossForceTier})`);
+
+// Cross-session without summary → excluded
+const crossNoSummary = createSegment("cross-no-summary");
+crossNoSummary.status = "closed";
+crossNoSummary.tokenCount = 100;
+crossNoSummary.messageCount = 3;
+crossNoSummary.messageIds = ["cns1"];
+crossNoSummary.sessionId = "past-session-id";
+crossNoSummary.summary = null;
+
+const crossNoSummaryScored: ScoredSegment[] = [
+  { segment: activeSeg, score: 1.0, semanticScore: 1, recencyScoreValue: 1 },
+  { segment: crossNoSummary, score: 0.9, semanticScore: 0.95, recencyScoreValue: 0.8 },
+];
+
+const crossNoSummaryBudgets = allocateBudgets(crossNoSummaryScored, 100000, 500, {
+  currentSessionId: "current-session",
+  pinRecentSegments: 0,
+  maxCrossSessionBudgetRatio: 1.0,
+  pinnedSegmentIds: [],
+});
+
+const crossNoSummaryTier = crossNoSummaryBudgets.find(b => b.segment.id === crossNoSummary.id)!.tier;
+assert(crossNoSummaryTier === "excluded", `cross-session no summary → excluded (got ${crossNoSummaryTier})`);
+
 // ── buildSelectionPlan ──
 console.log("\n  buildSelectionPlan:");
 
@@ -275,7 +328,7 @@ const planIndexMap = new Map<string, number>([
   ["pf1", 0], ["pf2", 1], ["pa1", 2], ["pa2", 3],
 ]);
 
-const planBudgets = allocateBudgets(planScored, 5000, 500);
+const planBudgets = allocateBudgets(planScored, 5000, 500, defaultAllocOpts);
 const plan = buildSelectionPlan(planBudgets, (segment) => {
   return segment.messageIds
     .map(id => planIndexMap.get(id))

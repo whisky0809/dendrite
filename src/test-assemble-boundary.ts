@@ -72,7 +72,7 @@ console.log("  round-trip with tool calls:");
 
   // Step 3: Score and allocate (single segment = passthrough-like)
   const scored = scoreSegments(segmenter.segments, [], 86400000, 0.7);
-  const budgets = allocateBudgets(scored, 100000, 16384);
+  const budgets = allocateBudgets(scored, 100000, 16384, { currentSessionId: undefined, pinRecentSegments: 0, maxCrossSessionBudgetRatio: 1.0, pinnedSegmentIds: [] });
   assert(budgets[0].tier === "active", "segment is active tier");
 
   // Step 4: Build assembled message array

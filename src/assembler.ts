@@ -35,12 +35,11 @@ export function allocateBudgets(
   scored: ScoredSegment[],
   totalBudget: number,
   reserveTokens: number,
-  options?: AllocateOptions
+  options: AllocateOptions
 ): BudgetAllocation[] {
   const allocations: BudgetAllocation[] = [];
-  const opts = options || { currentSessionId: undefined, pinRecentSegments: 0, maxCrossSessionBudgetRatio: 1.0, pinnedSegmentIds: [] };
-  const pinnedIds = new Set(opts.pinnedSegmentIds);
-  const crossSessionBudget = totalBudget * opts.maxCrossSessionBudgetRatio;
+  const pinnedIds = new Set(options.pinnedSegmentIds);
+  const crossSessionBudget = totalBudget * options.maxCrossSessionBudgetRatio;
   let crossSessionUsed = 0;
 
   const activeBudget = totalBudget + reserveTokens;
@@ -82,6 +81,17 @@ export function allocateBudgets(
 
     if (remaining <= 0) {
       allocations.push({ segment: seg, tier: "excluded", allocatedTokens: 0, scored: entry });
+      continue;
+    }
+
+    // Cross-session segments: summary-only (never full/partial)
+    if (isCrossSession) {
+      if (seg.summary && seg.summaryTokens <= remaining) {
+        allocations.push({ segment: seg, tier: "summary", allocatedTokens: seg.summaryTokens, scored: entry });
+        remaining -= seg.summaryTokens;
+      } else {
+        allocations.push({ segment: seg, tier: "excluded", allocatedTokens: 0, scored: entry });
+      }
       continue;
     }
 

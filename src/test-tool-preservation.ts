@@ -115,7 +115,7 @@ const scored: ScoredSegment[] = [
   { segment: seg1, score: 0.5, semanticScore: 0.3, recencyScoreValue: 0.2 },
 ];
 
-const budgets = allocateBudgets(scored, 10000, 2000);
+const budgets = allocateBudgets(scored, 10000, 2000, { currentSessionId: undefined, pinRecentSegments: 0, maxCrossSessionBudgetRatio: 1.0, pinnedSegmentIds: [] });
 const assembled = buildMessageArray(budgets, (ids) =>
   ids.map(id => msgMap.get(id)!).filter(Boolean)
 );
