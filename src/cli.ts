@@ -15,77 +15,22 @@ export function resolveTurn(turns: TurnListEntry[], index: number): TurnListEntr
   return turns.find(t => t.turnIndex === index) ?? null;
 }
 
-// ── Safe Editor Whitelist ──
+// ── Safe Editor Validation ──
 
 const SAFE_EDITORS = new Set([
-  "vi",
-  "vim",
-  "nvim",
-  "nano",
-  "emacs",
-  "emacsclient",
-  "code",
-  "code-insiders",
-  "subl",
-  "mate",
-  "gedit",
-  "notepad",
-  "notepad++",
-  "micro",
-  "helix",
-  "hx",
-  "joe",
-  "kak",
+  "vi", "vim", "nvim", "nano", "emacs", "emacsclient",
+  "code", "code-insiders", "subl", "mate", "gedit",
+  "notepad", "notepad++", "micro", "helix", "hx", "joe", "kak"
 ]);
 
 /**
- * Validates that an editor command is safe to execute.
- * For security, we only allow command names from a known whitelist.
- * If a path is provided, it MUST be an absolute path to a trusted system directory.
+ * Validates that an editor command is safe to execute by checking against a whitelist.
  */
 export function isSafeEditor(editor: string): boolean {
-  if (!editor) return false;
-
-  // Reject shell metacharacters and other suspicious symbols
-  if (/[;&|`$<>(){}\*\?\!#~\[\]]/.test(editor)) return false;
-
-  // If it's a path, we only allow absolute paths to standard system directories
-  if (editor.includes("/") || (path.sep === "\\" && editor.includes("\\"))) {
-    const isAbsolute = path.isAbsolute(editor);
-    if (!isAbsolute) return false;
-
-    // Use path.normalize to resolve ".." and "."
-    const normalized = path.normalize(editor);
-    const name = path.basename(normalized).toLowerCase();
-    const dir = path.dirname(normalized).toLowerCase();
-
-    // Whitelist for common system binary directories
-    const safeDirs = [
-      "/usr/bin",
-      "/usr/local/bin",
-      "/bin",
-      "/opt/homebrew/bin",
-      "/snap/bin",
-      "c:\\windows",
-      "c:\\windows\\system32",
-      "c:\\program files",
-      "c:\\program files (x86)",
-    ];
-
-    // More robust prefix matching: ensure the path exactly starts with a safe directory
-    // or is a subdirectory (by checking for trailing separator)
-    if (!safeDirs.some(d => {
-      const safe = d.toLowerCase();
-      return dir === safe || dir.startsWith(safe + path.sep) || (path.sep === "/" && dir.startsWith(safe + "/"));
-    })) {
-      return false;
-    }
-
-    return SAFE_EDITORS.has(name.replace(/\.exe$/, ""));
-  }
-
-  // If it's just a command name, check the whitelist
-  return SAFE_EDITORS.has(editor.toLowerCase());
+  if (!editor || /[;&|`$]/.test(editor)) return false;
+  // Handle both Unix and Windows path separators
+  const name = path.basename(editor.replace(/\\/g, "/")).toLowerCase().replace(".exe", "");
+  return SAFE_EDITORS.has(name);
 }
 
 // ── Config schema info (derived from openclaw.plugin.json) ──
