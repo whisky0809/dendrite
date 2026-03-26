@@ -300,58 +300,89 @@ export async function rebuildSessions(opts: RebuildOptions): Promise<RebuildResu
     const closedSegments = lastIndex.segments.filter((s: any) => s.status === "closed");
     if (closedSegments.length === 0) continue;
 
+    // Pre-parse transcript messages once and group by ID
+    const messageMap = new Map<string, SimpleMessage>();
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        // JSONL entries wrap the message: {type:"message", id:"...", message:{role, content, ...}}
+        const msg = entry.type === "message" && entry.message ? entry.message : entry;
+        const msgId = msg.id || entry.id;
+        if (msgId) {
+          const role = msg.role;
+          if (role !== "user" && role !== "assistant" && role !== "toolResult") continue;
+          const text = typeof msg.content === "string"
+            ? msg.content
+            : Array.isArray(msg.content)
+              ? msg.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
+              : "";
+          if (text) {
+            messageMap.set(msgId, {
+              id: msgId,
+              role,
+              content: text,
+              timestamp: msg.timestamp || entry.timestamp || 0,
+            });
+          }
+        }
+      } catch { /* skip */ }
+    }
+
+    // Concurrency control for summary generation
+    const CONCURRENCY_LIMIT = 5;
+    const summaryTasks: (() => Promise<void>)[] = [];
+
     // Generate summaries for segments missing them
     for (const seg of closedSegments) {
       if (!seg.summary && opts.summaryApiKey && !opts.dryRun) {
-        try {
-          // Load messages for this segment from transcript
-          const idSet = new Set(seg.messageIds as string[]);
-          const msgs: SimpleMessage[] = [];
-          for (const line of lines) {
-            try {
-              const entry = JSON.parse(line);
-              // JSONL entries wrap the message: {type:"message", id:"...", message:{role, content, ...}}
-              const msg = entry.type === "message" && entry.message ? entry.message : entry;
-              const msgId = msg.id || entry.id;
-              if (msgId && idSet.has(msgId)) {
-                const role = msg.role;
-                if (role !== "user" && role !== "assistant" && role !== "toolResult") continue;
-                const text = typeof msg.content === "string"
-                  ? msg.content
-                  : Array.isArray(msg.content)
-                    ? msg.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
-                    : "";
-                if (text) msgs.push({ id: msgId, role, content: text, timestamp: msg.timestamp || entry.timestamp || 0 });
-              }
-            } catch { /* skip */ }
-          }
-          if (msgs.length > 0) {
-            // Retry with exponential backoff for rate limits
-            let lastErr: any;
-            for (let attempt = 0; attempt < 3; attempt++) {
-              try {
-                seg.summary = await generateSummary(seg.topic, msgs, opts.summaryModel, opts.summaryApiKey);
-                seg.summaryTokens = Math.ceil(seg.summary.length / 4);
-                summariesGenerated++;
-                lastErr = null;
-                break;
-              } catch (err: any) {
-                lastErr = err;
-                if (attempt < 2) {
-                  const delay = 1000 * Math.pow(2, attempt); // 1s, 2s
-                  await new Promise(r => setTimeout(r, delay));
+        summaryTasks.push(async () => {
+          try {
+            // Load messages for this segment from pre-parsed map
+            const msgs: SimpleMessage[] = [];
+            for (const id of (seg.messageIds as string[])) {
+              const m = messageMap.get(id);
+              if (m) msgs.push(m);
+            }
+
+            if (msgs.length > 0) {
+              // Retry with exponential backoff for rate limits
+              let lastErr: any;
+              for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                  seg.summary = await generateSummary(seg.topic, msgs, opts.summaryModel, opts.summaryApiKey);
+                  seg.summaryTokens = Math.ceil(seg.summary.length / 4);
+                  summariesGenerated++;
+                  lastErr = null;
+                  break;
+                } catch (err: any) {
+                  lastErr = err;
+                  if (attempt < 2) {
+                    const delay = 1000 * Math.pow(2, attempt); // 1s, 2s
+                    await new Promise(r => setTimeout(r, delay));
+                  }
                 }
               }
+              if (lastErr) {
+                opts.logger.warn(`Failed to generate summary for ${seg.id} after 3 attempts: ${lastErr?.message || lastErr}`);
+              }
             }
-            if (lastErr) {
-              opts.logger.warn(`Failed to generate summary for ${seg.id} after 3 attempts: ${lastErr?.message || lastErr}`);
-            }
+          } catch (err: any) {
+            opts.logger.warn(`Failed to process segment ${seg.id}: ${err?.message || err}`);
           }
-        } catch (err: any) {
-          opts.logger.warn(`Failed to process segment ${seg.id}: ${err?.message || err}`);
-        }
+        });
       }
     }
+
+    // Process summary tasks with concurrency limit
+    const pool = new Set<Promise<void>>();
+    for (const task of summaryTasks) {
+      const promise = task().finally(() => pool.delete(promise));
+      pool.add(promise);
+      if (pool.size >= CONCURRENCY_LIMIT) {
+        await Promise.race(pool);
+      }
+    }
+    await Promise.all(pool);
 
     sessionsProcessed++;
     segmentsTotal += closedSegments.length;
