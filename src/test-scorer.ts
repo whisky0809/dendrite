@@ -20,6 +20,9 @@ assertApprox(cosineSimilarity([1, 0], [0, 1]), 0.0, 0.01, "orthogonal vectors");
 assertApprox(cosineSimilarity([1, 0], [-1, 0]), -1.0, 0.01, "opposite vectors");
 assertApprox(cosineSimilarity([], []), 0.0, 0.01, "empty vectors");
 assertApprox(cosineSimilarity([3, 4], [3, 4]), 1.0, 0.01, "scaled identical");
+assertApprox(cosineSimilarity([0, 0], [0, 0]), 0.0, 0.01, "zero vectors");
+assertApprox(cosineSimilarity([0, 0], [1, 1]), 0.0, 0.01, "one zero vector");
+assertApprox(cosineSimilarity([1, 2], [1]), 0.0, 0.01, "different length vectors");
 
 // recencyScore — time-based
 console.log("\n  recencyScore (time-based):");
