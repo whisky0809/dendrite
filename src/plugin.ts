@@ -226,14 +226,11 @@ export default function dendrite(api: any) {
               if (entry.dendrite === "segment-index" && !lastIndex) {
                 lastIndex = { version: entry.version, segments: entry.segments };
               }
-            } catch {
-              debug("skipped malformed line in transcript backwards scan", { lineIndex: i });
-            }
+            } catch { /* skip malformed lines */ }
           }
 
           let msgIndex = 0;
-          for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
+          for (const line of lines) {
             try {
               const entry = JSON.parse(line);
               // JSONL entries wrap the message: {type:"message", message:{role, content, ...}}
@@ -243,9 +240,7 @@ export default function dendrite(api: any) {
                 const simple = toSimpleMessage(msg, msgIndex++);
                 if (simple) allSimpleMessages.push(simple);
               }
-            } catch {
-              debug("skipped malformed line in transcript forward scan", { lineIndex: i });
-            }
+            } catch { /* skip */ }
           }
 
           if (lastIndex) {
