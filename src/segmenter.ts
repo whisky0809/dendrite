@@ -1,4 +1,4 @@
-import { createSegment, estimateTokens, type Segment, type SegmentIndex, type SimpleMessage, type DendriteConfig } from "./types.js";
+import { createSegment, estimateTokens, type Segment, type SegmentIndex, type SimpleMessage } from "./types.js";
 
 // ── Drift detection prompt (extracted from v1 llm-drift-detector.ts) ──
 
