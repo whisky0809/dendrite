@@ -68,7 +68,7 @@ export async function callDriftModel(
   system: string,
   user: string,
   model: string,
-  apiKey: string = process.env.OPENROUTER_API_KEY || ""
+  apiKey: string = ""
 ): Promise<DriftVerdict> {
   const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",

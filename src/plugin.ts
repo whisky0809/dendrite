@@ -164,9 +164,9 @@ export default function dendrite(api: any) {
     let key = "";
     try {
       const auth = await api.runtime?.modelAuth?.resolveApiKeyForProvider?.({ provider: "openrouter" });
-      key = auth?.apiKey || process.env.OPENROUTER_API_KEY || "";
+      key = auth?.apiKey || "";
     } catch {
-      key = process.env.OPENROUTER_API_KEY || "";
+      key = "";
     }
     cachedOpenRouterKey = key;
     debug("resolved openrouter key", { available: !!key });
@@ -178,9 +178,9 @@ export default function dendrite(api: any) {
     let key = "";
     try {
       const auth = await api.runtime?.modelAuth?.resolveApiKeyForProvider?.({ provider: "google" });
-      key = auth?.apiKey || (auth as any)?.key || process.env.GEMINI_API_KEY || "";
+      key = auth?.apiKey || (auth as any)?.key || "";
     } catch {
-      key = process.env.GEMINI_API_KEY || "";
+      key = "";
     }
     cachedGoogleKey = key;
     debug("resolved google key", { available: !!key });
